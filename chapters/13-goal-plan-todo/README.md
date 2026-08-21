@@ -1,8 +1,8 @@
 # 13｜目标、计划与任务清单
 
-> 预计时间：60 分钟 ｜ 前置：完成第 05 章（事件日志） ｜ 本章纯本地运行，不调用模型
+> 预计时间：60 分钟 ｜ 前置：完成第 12 章 ｜ 本章调用真实 DeepSeek 模型
 
-第 07 章的智能体能够连续对话，但连续对话不等于能够管理长期任务。以“把一个旧工具迁移到新框架”为例，程序需要随时回答：当前目标是什么？是否应该继续？接下来有哪些步骤？如果这些信息只写在普通对话里，模型可能忽略它们；如果只存在内存中，程序退出后又会丢失。
+第 12 章解决了智能体怎样按需获得任务指导，但操作手册不能代替任务本身的状态管理。第 07 章的智能体已经能够连续对话，连续对话却不等于能够管理长期任务。以“把一个旧工具迁移到新框架”为例，程序需要随时回答：当前目标是什么？是否应该继续？接下来有哪些步骤？如果这些信息只写在普通对话里，模型可能忽略它们；如果只存在内存中，程序退出后又会丢失。
 
 本章把这些信息分成四类，各自解决一个问题：
 
@@ -22,7 +22,8 @@
 - 把目标变更写入会话日志，并通过重放恢复当前目标；
 - 在下一步骤开始时提交计划模式的切换，并通过用户明确评审退出；
 - 使用统一的用户问答服务传递问题与结构化答案；
-- 使用整体替换的方式维护并校验任务清单。
+- 使用整体替换的方式维护并校验任务清单；
+- 让模型按顺序完成范围确认、计划评审、目标创建和任务清单写入。
 
 ## 13.1 计划模式与用户问答为什么分开
 
@@ -167,66 +168,61 @@ def todo_write(
 2. 每项任务只有等待中 `pending`、进行中 `in_progress` 和已完成 `completed` 三种状态，避免引入含义相近的额外状态。
 3. 写入前会去除内容两端的空白，再检查空项、重复项和非法状态。`allow_parallel_in_progress=False` 时还会拒绝同时存在多个进行中任务。返回的错误会明确告诉模型应该修正什么。
 
-## 13.6 运行完整示例
+## 13.6 把四类任务状态接入模型循环
+
+示例从计划模式开始，并向模型同时注册四个工具：`ask_user_question`、`exit_plan_mode`、`create_goal` 和 `todo_write`。用户任务明确要求依次确认范围、提交计划、创建目标，再写入三项任务清单。模型需要根据每次工具结果决定下一步，而不是由 Python 代码直接调用四项能力。
+
+`agent.py` 在每个步骤开始时调用 `plan_mode.apply_boundary()`，再根据当前模式重新组装系统提示词：
+
+```python
+for step in range(1, max_steps + 1):
+    notice = plan_mode.apply_boundary()
+    system_prompt = "你是任务规划助手……"
+    plan_section = plan_mode.prompt_section()
+    if plan_section:
+        system_prompt += "\n\n" + plan_section
+    reply = client.chat(
+        [Message("system", system_prompt), *session.derive_messages()],
+        tools,
+    )
+```
+
+`exit_plan_mode` 获批时只把退出选择放入待生效状态。`create_goal` 和 `todo_write` 还会检查当前是否仍处于计划模式，因此模型即使把它们与退出工具放在同一批调用中，也不会提前实施。下一步骤提交 `plan/mode=false` 后，目标和清单工具才会成功。
+
+命令行示例没有交互界面，因此 `TeachingProvider` 代替终端用户选择每个问题的第一项，并在计划评审时选择 `Approve`。这只固定了人类输入；问题内容、计划、目标和清单仍由真实模型生成，所有工具调用与结果都进入同一份会话日志。
+
+## 13.7 运行完整示例
 
 ```bash
 uv run python chapters/13-goal-plan-todo/src/demo.py
 ```
 
-完整输出，本地确定性运行：
+下面是一次真实运行的关键输出。模型生成的问题、计划文字和目标表述可能变化：
 
 ```
-━━━ ① 用户问答 + Plan Mode ━━━
-  provider 收到: 是否只迁移公开接口？
-  ask_user_question → {"answers":[{"id":"scope","selected":["是"]}]}
-  set(on) → committed
-  provider 收到: Approve this plan and leave plan mode?
-  exit_plan_mode → Plan approved — plan mode exited; carry out the plan starting with your next step.
-  评审后: active=True, pending=False
-  下一 step: active=False
+用户问答: 旧工具迁移到新框架时，是否只迁移公开接口？ -> 是，只迁移公开接口
+用户问答: Approve this plan and leave plan mode? -> Approve
 
-━━━ ② Goal 生命周期 ━━━
-  create →
-  r1 [active] rounds=0/5  把内部工具迁移到新框架
-  admit_round →
-  r1 [active] rounds=1/5  把内部工具迁移到新框架
-  pause →
-  r2 [paused] rounds=1/5  把内部工具迁移到新框架
-  resume →
-  r3 [active] rounds=1/5  把内部工具迁移到新框架
-  block →
-  r4 [blocked] rounds=1/5  把内部工具迁移到新框架  (blocked: 依赖上游发布)
-  resume（清除阻塞原因）→
-  r5 [active] rounds=1/5  把内部工具迁移到新框架
-  complete →
-  r6 [complete] rounds=1/5  把内部工具迁移到新框架
+=== 模型调用的任务工具 ===
+ask_user_question({...})
+{"answers":[{"id":"scope","selected":["是，只迁移公开接口"]}]}
+exit_plan_mode({'plan': '## 迁移计划……'})
+工具执行出错: exit_plan_mode requires a non-empty markdown plan starting with a # heading
+exit_plan_mode({'plan': '# 迁移计划：旧工具 → 新框架（仅公开接口）……'})
+Plan approved — plan mode exited; carry out the plan starting with your next step.
+create_goal({'objective': '将旧工具仅迁移公开接口到新框架……'})
+{"id": "goal-26", "revision": 1}
+todo_write({'todos': [...]})
+Updated todo list: 2 pending, 1 in progress, 0 completed.
 
-━━━ ③ revision 守卫：过期引用被拒绝 ━━━
-  引用指向不同的目标（ref=goal-4 != 当前=goal-11）
+模型最终回答:
+已确认迁移范围，计划已经批准，并已创建长期目标和三项任务清单。
 
-━━━ ④ 事件溯源：goal/change 事件与连续性回放 ━━━
-  #4  goal/change create r1 [active]
-  #6  goal/change pause r2 [paused]
-  #7  goal/change resume r3 [active]
-  #8  goal/change block r4 [blocked]
-  #9  goal/change resume r5 [active]
-  #10 goal/change complete r6 [complete]
-  #11 goal/change create r1 [active]
-  回放后的当前目标: r1 [active]
-  ← 目标状态只由事件派生：日志是唯一持久权威
-
-━━━ ⑤ todo：整体替换与校验 ━━━
-  Updated todo list: 0 pending, 1 in progress, 0 completed.
-  Updated todo list: 1 pending, 1 in progress, 0 completed.
-  Error: invalid todos: 重复的 content: "写第 01 章"
-  Error: invalid todos: 无效的 status: "doing"（只允许 pending/in_progress/completed）
+日志恢复出的目标: r1 [active] 将旧工具仅迁移公开接口到新框架……
+日志中的任务清单写入次数: 1
 ```
 
-观察点：① `ask_user_question` 取得结构化答案，`exit_plan_mode` 再提交计划供用户确认；批准后先记录待生效状态，到下一步骤才真正退出计划模式。② 修改目标状态会增加 `revision`，`admit_round` 只增加已经开始的轮数；调用 `resume` 后会清除阻塞原因。③ 过期引用被明确拒绝；⑤ 的两条错误信息分别提示模型删除重复任务和改正状态值。
-
-## 13.7 在第 17 章中的使用方式
-
-第 17 章会把 `GoalStore`、`PlanModeController`、`UserQuestionService` 和 Todo 绑定到同一个会话。模型可以读取和更新目标、写入任务清单、向用户提问，并提交计划供用户确认。计划模式的提示词会在每个步骤重新生成，批准后的模式变化也只在下一步骤开始时生效。`--rpc` 还提供 `plan.set`，供外部程序切换协作模式。
+这次运行还展示了错误回灌。模型第一次提交的计划以二级标题 `##` 开头，不符合工具要求；错误作为工具结果进入下一次请求后，模型改用一级标题 `#` 并再次提交。批准后，模式在步骤边界切换，目标与清单依次写入事件日志。最后打印出的目标和 `todo/write` 次数来自真实日志，而不是模型的文字总结。
 
 ## 本章小结
 
@@ -236,6 +232,7 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 - `GoalRef`：通过目标编号和版本号拒绝过期修改
 - `goal/change`：保存完整目标快照，并支持从日志恢复
 - `todo_write`：整体替换任务清单，校验内容和状态
+- 真实模型流程：范围确认、计划评审、模式切换、目标和清单共用一个事件驱动循环
 - 恢复后不会自动续行，必须重新确认当前环境后再继续
 
 ## 对照官方
@@ -256,4 +253,4 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 2. 一个长任务可能经历暂停、恢复、阻塞和完成。画出你认为合理的状态迁移，并说明哪些迁移必须拒绝、哪些需要人类确认，以及崩溃后如何从事件日志恢复。
 3. 计划模式只改变协作提示，不是文件权限。假设模型在计划阶段仍尝试写文件，系统还需要哪些独立控制？为什么不能依赖提示词保证安全？
 4. 两个调用方基于同一个目标版本同时更新时，其中一个操作会被拒绝。讨论这种乐观并发控制对自动化智能体和人类协作者的好处，并设计冲突后的重新读取或合并流程。
-5. 编写一个本地任务流程，组合长期目标、任务清单、计划模式和结构化用户问答：先提出计划，处理批准或反馈，再执行若干任务并更新目标。模拟一次拒绝和一次中途恢复，验证状态可以从日志重新得到。
+5. 扩展本章的真实模型流程：先让用户拒绝一次计划并给出反馈，再批准修订版；随后完成一项任务并更新目标。中途保存和恢复会话，验证当前模式、目标与清单都能从日志重新得到。

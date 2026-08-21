@@ -2,6 +2,8 @@
   <img src="docs/images/logo.svg" alt="mini-harness" width="480">
 </p>
 
+<h1 align="center">mini-harness：DeepSeek Harness Python 教程</h1>
+
 <p align="center"><b>用 Python 从一次模型调用开始，逐步构建 DeepSeek Harness 的核心运行机制</b></p>
 <p align="center">
   <a href="README_EN.md">English</a>
@@ -44,33 +46,28 @@ mini-harness 将 DSH 的核心机制拆成 17 个 Python 章节。课程从最�
 
 项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 环境和依赖，需要 Python 3.11 或更高版本。
 
-### 运行本地章节
-
-第 03、04、08、10、11、12、13、16 章只演示本地机制，不访问模型，也不需要 API Key。下面的命令会安装依赖并运行这 8 章：
+先安装项目依赖：
 
 ```bash
 uv sync
-uv run python scripts/run_all.py --local-only
 ```
 
-### 从第 01 章开始学习
-
-第 01 章会连接 DeepSeek API，先从模板创建本地配置：
+第 01 章会连接 DeepSeek API。从模板创建本地配置，并填入自己的密钥：
 
 ```bash
 cp .env.example .env
 # 编辑 .env，填入自己的 DEEPSEEK_API_KEY
-uv sync
+```
+
+`.env` 已加入 Git 忽略规则，不会被正常的 Git 操作提交。联网章节会优先读取进程环境变量中的 `DEEPSEEK_API_KEY`，没有时再读取项目根目录的 `.env`。
+
+最后运行第 01 章，观察一次非流式调用、一次流式调用和完整消息组装：
+
+```bash
 uv run python chapters/01-streaming-agent/src/demo.py
 ```
 
-`.env` 已加入 Git 忽略规则。联网章节按照“进程环境变量优先、项目根目录 `.env` 作为本地回退”的顺序读取 `DEEPSEEK_API_KEY`。mini-harness 只从这里读取密钥，模型和端点直接写在各章代码中；如果运行官方 DSH，`DEEPSEEK_BASE_URL`、`DSH_MODEL` 等启动级变量应通过进程环境设置，官方启动器会拒绝从 `.env` 读取它们。
-
-全部章节可以通过一条命令运行，其中 9 章会访问 DeepSeek API 并产生模型用量：
-
-```bash
-uv run python scripts/run_all.py
-```
+这次运行会产生真实的 DeepSeek API 用量。完成后继续阅读[第 01 章说明](chapters/01-streaming-agent/README.md)，再按章节顺序学习。第 03、04 章只运行本地代码，其他章节的运行方式和联网范围会在各章开头说明。
 
 ## 课程如何组织
 
@@ -103,7 +100,7 @@ uv run python scripts/run_all.py
 | [05｜会话日志](chapters/05-session-log/README.md) | 只追加的事件日志如何还原对话，同时保留完整运行过程？ | DeepSeek API |
 | [06｜组装模型请求](chapters/06-prompt-tools/README.md) | 系统提示词、历史消息和工具说明如何组成一次模型请求？ | DeepSeek API |
 | [07｜多轮运行与消息队列](chapters/07-agent-inbox/README.md) | 后续问题和中途补充的要求应在什么时候进入运行过程？ | DeepSeek API |
-| [08｜会话持久化](chapters/08-persistence/README.md) | JSONL 如何恢复中断的会话，重要操作前又应保存哪些记录？ | 本地 |
+| [08｜会话持久化](chapters/08-persistence/README.md) | JSONL 如何恢复中断的会话，重要操作前又应保存哪些记录？ | DeepSeek API |
 | [09｜上下文工程](chapters/09-context-engineering/README.md) | 摘要、结果裁剪和外部存储如何共同控制上下文长度？ | DeepSeek API |
 
 ### 第四部分：扩展智能体的能力
@@ -112,10 +109,10 @@ uv run python scripts/run_all.py
 
 | 章节 | 核心问题 | 运行方式 |
 |---|---|---|
-| [10｜文件系统](chapters/10-filesystem/README.md) | 路径围栏、读后写检查和观察记录如何降低文件误操作风险？ | 本地 |
-| [11｜命令执行与审批](chapters/11-shell-sandbox/README.md) | 终端命令如何经过权限判断、审批、超时和结果回收？ | 本地 |
-| [12｜技能与按需加载](chapters/12-instructions-skills/README.md) | 技能目录如何只暴露摘要，并在使用时加载完整指令？ | 本地 |
-| [13｜目标、计划与任务清单](chapters/13-goal-plan-todo/README.md) | 长任务状态、计划评审与结构化用户问答怎样协作？ | 本地 |
+| [10｜文件系统](chapters/10-filesystem/README.md) | 路径围栏、读后写检查和观察记录如何降低文件误操作风险？ | DeepSeek API |
+| [11｜命令执行与审批](chapters/11-shell-sandbox/README.md) | 终端命令如何经过权限判断、审批、超时和结果回收？ | DeepSeek API |
+| [12｜技能与按需加载](chapters/12-instructions-skills/README.md) | 技能目录如何只暴露摘要，并在使用时加载完整指令？ | DeepSeek API |
+| [13｜目标、计划与任务清单](chapters/13-goal-plan-todo/README.md) | 长任务状态、计划评审与结构化用户问答怎样协作？ | DeepSeek API |
 | [14｜子智能体、后台任务与工作流](chapters/14-subagents-workflow/README.md) | 子任务如何隔离上下文、在前台或后台运行，并安全返回结果？ | DeepSeek API |
 | [15｜网络搜索与网页抓取](chapters/15-external-capabilities/README.md) | 智能体如何搜索网络，并把搜索结果整理成可以核对的来源？ | DeepSeek API + Web Search |
 
@@ -125,7 +122,7 @@ uv run python scripts/run_all.py
 
 | 章节 | 核心问题 | 运行方式 |
 |---|---|---|
-| [16｜配置与 RPC](chapters/16-settings-jsonrpc/README.md) | 多层配置如何合并，JSON-RPC 如何校验并分发外部请求？ | 本地 |
+| [16｜配置与 RPC](chapters/16-settings-jsonrpc/README.md) | 多层配置如何合并，JSON-RPC 如何校验并分发外部请求？ | DeepSeek API |
 | [17｜命令行智能体的完整组装](chapters/17-headless-capstone/README.md) | “一切皆插件”怎样把第 10–16 章的能力接入同一个智能体？ | DeepSeek API |
 
 ## 一次任务如何完成
@@ -153,7 +150,7 @@ flowchart TB
     PERSIST --> OUT[第 17 章返回结果<br>标准输出与退出码]
 ```
 
-第 03、04 章不再只是独立知识点。第 17 章的 `build_agent()` 只负责挂载一组插件；第 10–16 章既保留独立示例，也通过提供服务、使用服务或监听运行事件接入提示词、工具目录、智能体生命周期、配置与 RPC。插件不等于模型工具：24 个工具会出现在模型可见的工具说明中，模型请求重试、关键节点保存、会话和模型连接等插件则只在程序内部工作。
+第 03、04 章建立的插件与服务机制会在第 17 章重新出现。文件、命令和技能等能力会成为模型可以选择的工具；模型连接、会话保存、失败重试和上下文控制则在程序内部工作。它们都通过插件接入，但只有需要模型主动调用的能力才会出现在工具清单中。
 
 ## 每章的学习方式
 
@@ -222,7 +219,6 @@ mini-harness/
 │   │   └── src/           # 当前章节的完整实现和 demo.py
 │   ├── ...
 │   └── 17-headless-capstone/
-├── scripts/run_all.py     # 发现并运行 17 个章节 demo
 ├── docs/images/logo.svg
 ├── .env.example
 └── pyproject.toml
@@ -230,7 +226,7 @@ mini-harness/
 
 ## 安全边界
 
-文件和命令章节会显式演示不同权限模式：第 10 章在临时工作区使用 `workspace-write` 验证写入围栏，第 11 章从 `read-only` 开始，再演示审批与一次性授权。文件路径会先规范化再检查允许范围，命令执行带有超时和结果回收。这些机制用于减少学习和本地实验中的误操作。
+文件和命令章节会把真实模型调用限制在临时工作区：第 10 章使用 `workspace-write`，要求模型先读、再改、最后复查；第 11 章只批准示例指定的两条精确命令。文件路径会先规范化再检查允许范围，命令执行带有审批、超时和结果回收。这些机制用于减少学习和本地实验中的误操作。
 
 路径围栏仍运行在普通 Python 进程中，不能替代操作系统级沙箱。子进程拥有当前用户已经具备的系统权限。课程也没有实现图形界面、HTTP 服务、热重载和云端隔离环境，这些能力不影响命令行运行主线的学习。
 

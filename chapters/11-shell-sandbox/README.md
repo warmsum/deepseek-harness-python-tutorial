@@ -1,6 +1,6 @@
 # 11｜命令执行与审批
 
-> 预计时间：60 分钟 ｜ 前置：完成第 10 章 ｜ 本章纯本地运行，不调用模型
+> 预计时间：60 分钟 ｜ 前置：完成第 10 章 ｜ 本章调用真实 DeepSeek 模型
 
 文件工具只能完成预先定义的读写操作，开发任务还需要运行测试、构建和 Git 命令。Shell 命令的能力范围更大，一条命令既可能删除大量文件，也可能读取不应暴露的数据。因此，执行命令前需要经过两层决策：
 
@@ -16,7 +16,8 @@
 - 使用 `subprocess` 捕获命令输出、退出码与超时状态；
 - 按模式、审批策略和一次性授权决定是否执行命令；
 - 解释“一次性授权”和“检查失败时默认拒绝”的安全含义；
-- 区分教学版的文本决策层与官方内核级隔离。
+- 区分教学版的文本决策层与官方内核级隔离；
+- 把模型提出的命令接入审批、执行和结果回灌流程。
 
 ## 11.1 原理：执行、超时与审批的三个问题
 
@@ -122,45 +123,54 @@ def run_command(
 
 审批采用“失败时默认拒绝”的原则，也称为 fail closed。`never` 策略直接拒绝；`ask` 策略调用审批函数，只有 `allowed-once` 会放行。审批通道不可用时，智能体停止当前动作，不会绕过检查继续执行。
 
-## 11.4 运行完整示例
+## 11.4 从模型请求到审批和执行
+
+`demo.py` 把 `ShellPolicy.execute()` 包装成一个 `shell` 模型工具。模型只负责提出命令，程序仍掌握是否执行的决定权：
+
+```python
+def execute(arguments: dict[str, Any]) -> str:
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command:
+        raise ValueError("command 必须是非空字符串")
+    result = policy.execute(command, cwd=str(workspace), timeout_seconds=5)
+    return (
+        f"exit_code={result.exit_code}\n"
+        f"stdout={result.stdout.strip() or '(空)'}\n"
+        f"stderr={result.stderr.strip() or '(空)'}"
+    )
+```
+
+本章任务要求模型依次执行两条精确命令：先用 `echo approved > approved.txt` 创建文件，再用 `cat approved.txt` 读取内容。审批回调只允许这两条完整字符串；模型如果改写命令、增加管道或提出其他操作，就会得到 `rejected`，命令不会执行。
+
+这条流程包含三个彼此独立的决定：模型选择调用什么工具，审批器决定某条命令能否运行，执行器负责超时、退出码和输出。工具结果随后送回模型，最终回答必须依据真实的 `stdout` 和 `stderr`，而不是预测命令会产生什么结果。
+
+## 11.5 运行完整示例
 
 ```bash
 uv run python chapters/11-shell-sandbox/src/demo.py
 ```
 
-完整输出，本地确定性运行：
+下面是一次真实运行的主要输出，模型最终回答的分步说明已省略。回答措辞可能变化，审批和命令结果由程序产生：
 
 ```
-━━━ ① 只读命令：模式门放行 ━━━
-  exit=0
-  stdout:
-precious.txt
-  stderr: (空)
+审批请求: echo approved > approved.txt -> allowed-once
+审批请求: cat approved.txt -> allowed-once
 
-━━━ ② read-only 模式拒绝写类命令 ━━━
-  stderr: [sandbox] read-only 模式拒绝写类/未知命令: rm -f precious.txt
-（命令未执行）
-  文件还在吗: True
+=== 模型发起的命令 ===
+shell({'command': 'echo approved > approved.txt'})
+exit_code=0
+stdout=(空)
+stderr=(空)
+shell({'command': 'cat approved.txt'})
+exit_code=0
+stdout=approved
+stderr=(空)
 
-━━━ ③ 审批流：ask + 模拟用户（workspace-write 模式） ━━━
-  [用户拒绝] [approval] 审批被拒绝
-（命令未执行）
-  [用户批准] exit=0，文件还在吗: False
-  [never 策略] [approval] 审批策略为 never，直接拒绝
-（命令未执行）
-
-━━━ ④ 一次性授权：grant_once 用后即焚 ━━━
-  第 1 次执行（持票据）: exit=0，文件还在吗: False
-  第 2 次执行（票据已焚）: [sandbox] read-only 模式拒绝写类/未知命令: rm -f precious.txt
-（命令未执行）
-  文件还在吗: True
+模型最终回答: 两个命令均执行成功，approved.txt 中的内容为 approved。
+文件是否由获批命令创建: True
 ```
 
-四条路径分别验证了运行模式、人工审批和一次性授权：只读模式拒绝写命令；同一运行模式下，审批结果会改变某条命令是否执行；一次性授权使用后，下一次调用会重新经过正常判断。
-
-## 11.5 在第 17 章中的使用方式
-
-第 17 章会把 `run_command` 包装成 `shell` 工具。`shell_mode`、`approval_policy` 和 `shell_timeout_seconds` 来自 `agent` 配置；命令先经过 `ShellPolicy` 判断，允许后才交给子进程执行。这仍然只是普通 Python 进程中的决策层，不具备官方平台的内核级隔离。
+输出先记录审批结果，再显示模型实际提出的命令和子进程结果。第一条命令没有标准输出，但退出码为 0；第二条命令读取到 `approved`。文件最终存在，说明写入来自获批命令。若审批回调返回拒绝、取消或不可用，工具仍会把结构化失败结果交还模型，但不会启动子进程。
 
 ## 本章小结
 
@@ -168,6 +178,7 @@ precious.txt
 - `ShellPolicy.decide`：票据、模式门、审批的三段决策链
 - read-only 白名单使用精确命令名和 `shell=False`，拒绝命令拼接绕过
 - 审批结果：只有一次性允许会执行命令，审批失败或不可用时默认拒绝
+- 真实模型流程：模型提出命令，审批器决定是否放行，执行结果再返回模型
 - 实现边界：教学版不校验 cwd，也不包含内核隔离；官方 bash-sandbox 使用 seatbelt 与 landlock
 
 ## 对照官方

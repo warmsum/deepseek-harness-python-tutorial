@@ -1,8 +1,8 @@
 # 12｜技能与按需加载
 
-> 预计时间：50 分钟 ｜ 前置：完成第 09 章（token 概念） ｜ 本章纯本地运行，不调用模型
+> 预计时间：50 分钟 ｜ 前置：完成第 11 章 ｜ 本章调用真实 DeepSeek 模型
 
-随着智能体能力增加，系统中会出现许多面向具体任务的操作手册，例如怎样搜索网络、编写 Git 提交信息，或者运行某个项目的测试。这些内容只在特定任务中使用。如果全部放进系统提示词，每轮请求都要携带所有手册，即使当前任务与它们无关。
+第 10、11 章为智能体增加了文件和命令工具。随着能力继续增加，系统中还会出现许多面向具体任务的操作手册，例如怎样搜索网络、编写 Git 提交信息，或者运行某个项目的测试。这些内容只在特定任务中使用。如果全部放进系统提示词，每轮请求都要携带所有手册，即使当前任务与它们无关。
 
 Skills（技能）把操作手册分成“简短介绍”和“完整正文”两层。模型平时只看到包含名称和一句话说明的技能菜单；确定要使用某项技能后，再通过 `skill` 工具读取完整手册。这种先展示摘要、用到时再读取正文的方法称为渐进式加载。
 
@@ -13,7 +13,8 @@ Skills（技能）把操作手册分成“简短介绍”和“完整正文”�
 - 解释技能摘要常驻、正文按需加载如何节省 token；
 - 按 `skills/<name>/SKILL.md` 约定扫描技能目录；
 - 解析文件开头的 frontmatter 元数据，并把技能正文包装成 `<skill_content>` 块；
-- 说明每次重新读取正文而不缓存的行为意义。
+- 说明每次重新读取正文而不缓存的行为意义；
+- 让模型根据任务选择技能，调用 `skill` 加载正文后再完成任务。
 
 ## 12.1 原理：菜单常驻，正文按需
 
@@ -26,7 +27,7 @@ Skills（技能）把操作手册分成“简短介绍”和“完整正文”�
 
 示例中的两个技能摘要约占 30 token，而完整正文需要数百 token。技能越多、正文越长，差距越明显。假设有 50 个技能，每份正文占 500 token，把正文全部放进提示词会让每轮请求增加约 25000 token；按需加载时，只有真正使用的那一份会进入上下文。
 
-按需加载还可以及时反映文件变化。技能文件可能被用户编辑，本章示例会验证：每次调用都重新读取磁盘，因此修改后的正文会在下一次加载时生效；如果长期缓存正文，智能体可能继续使用旧指令。
+按需加载还可以及时反映文件变化。技能文件可能被用户编辑，`SkillCatalog.load()` 每次调用都重新读取磁盘，因此修改后的正文会在下一次加载时生效；如果长期缓存正文，智能体可能继续使用旧指令。
 
 第三个好处与第 06 章相呼应：每个技能在自己的 SKILL.md 中维护正文，系统提示词组装器只需要提供技能目录，不必内置每份手册的内容。
 
@@ -126,42 +127,55 @@ class SkillCatalog:
 
 包装分成两块：`skill_resources` 告诉模型相对路径从哪个目录解析，并提醒它只在需要时加载其他资源；`skill_instructions` 保存操作手册正文。外层标签还记录技能名称，使模型能够看出这段内容的来源和范围。
 
-## 12.4 运行完整示例
+## 12.4 让模型自己选择并加载技能
+
+扫描目录后，程序只把 `catalog.catalog_text()` 生成的技能菜单放进系统提示词，同时注册一个很小的 `skill` 工具：
+
+```python
+skill_tool = Tool(
+    "skill",
+    "按名称加载一项技能的完整操作说明。任务匹配技能时先调用此工具。",
+    {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+    load_skill,
+)
+```
+
+用户要求编写 Git 提交信息时，模型最初只能看到 `git-commit-guide` 和 `web-search-guide` 的名称与说明。它需要先判断任务与哪项技能匹配，再调用 `skill({"name": "git-commit-guide"})`。工具从磁盘读取并包装正文，结果进入下一次模型请求后，模型才能按照其中的类型、范围、主题和正文规则生成提交信息。
+
+这里没有在 Python 代码中预先指定要加载哪项技能。选择由模型完成，目录负责提供可选项，工具负责校验名称和读取内容，技能正文负责约束最终任务。三层职责分开后，新增技能不需要修改模型循环。
+
+## 12.5 运行完整示例
 
 ```bash
 uv run python chapters/12-instructions-skills/src/demo.py
 ```
 
-完整输出，本地确定性运行：
+下面是一次真实运行的主要输出。模型生成的提交信息可能变化，技能目录和加载内容来自当前文件：
 
 ```
-━━━ ① 目录消息：模型每轮看到的「技能菜单」 ━━━
-  可用技能：
+=== 模型最初看到的技能目录 ===
+可用技能：
 - git-commit-guide: 如何编写规范的 git commit message（类型、范围、主题、正文）
 - web-search-guide: 如何使用 Web Search 工具高效搜索网络、挑选来源、引用结果
-  （目录消息 120 字符 ≈ 30 token）
+目录估算: 30 token
 
-━━━ ② 模型请求 skill 工具 → 渐进加载 → <skill_content> 块 ━━━
-  <skill_content name="web-search-guide">
+=== 模型按需加载的技能 ===
+skill({'name': 'git-commit-guide'})
+加载正文估算: 182 token
+<skill_content name="git-commit-guide">
 <skill_resources>
-Base directory for this skill: …/skills/web-search-guide
+Base directory for this skill: …/skills/git-commit-guide
 Resolve relati…
-  （加载后的指令体 ≈ 162 token）
 
-━━━ ③ 账本：常驻注入 vs 按需加载 ━━━
-  常驻注入（2 个技能全部加载）: 每轮 374 token
-  按需加载（目录 + 1 个技能）  : 每轮 192 token
-  每轮节省 ≈ 182 token；技能越多、正文越长，差距越大
-
-━━━ ④ 每次重读不缓存：改文件立即生效 ━━━
-  修改后再加载，新内容已生效: True
+模型依据技能生成的结果:
+refactor(course): 重写练习使每章含开放思考题与实践题
 ```
 
-示例中的两个小技能每轮就能少发送约 182 token；技能数量和正文长度增加后，节省会更加明显。第 ④ 节则验证了“不缓存正文”：修改技能文件后，再次加载会立即得到新版本。
-
-## 12.5 在第 17 章中的使用方式
-
-第 17 章会根据配置项 `skills_root` 扫描 `SkillCatalog`，把名称和说明加入系统提示词中的技能菜单，同时注册一个 `skill` 工具。模型选择某个名称后，工具才读取并包装对应的 `SKILL.md`；其他技能正文不会随每次请求重复发送。
+调用记录说明模型选择了与任务匹配的 `git-commit-guide`，没有加载无关的网络搜索技能。目录约 30 token，完整正文只在工具调用后进入会话。最终结果遵循技能中的提交信息结构；如果修改 `SKILL.md` 后再次运行，工具会读取新正文而不是旧缓存。
 
 ## 本章小结
 
@@ -169,6 +183,7 @@ Resolve relati…
 - `SkillCatalog`：扫描摘要时不读取正文，加载技能时重新读取文件
 - `render`：用 `<skill_content>` 区分资源路径说明和操作手册正文
 - 名称校验：技能名使用固定格式，并与目录名保持一致
+- 真实模型流程：模型先看摘要目录，再调用 `skill` 读取匹配任务的完整正文
 - 两个示例技能：web-search-guide、git-commit-guide
 
 ## 对照官方
@@ -177,7 +192,7 @@ Resolve relati…
 |----------|--------------|------|
 | [`packages/skill/skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/skill/README.zh.md) | `SkillCatalog` | 官方同样提供摘要目录、统一内容渲染和每次重新取正文的渐进式加载 |
 | 同上 | （未实现） | 官方还支持多种技能来源、宿主和作用域分层、按优先级解决重名、缓存失效和调用记录；教学版只读取一个磁盘目录 |
-| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/tool-skill/README.zh.md) | （练习 2） | 官方把技能目录和 `skill` 工具放在同一个插件中，由模型调用工具读取正文 |
+| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/tool-skill/README.zh.md) | `skill` 工具 | 官方把技能目录和 `skill` 工具放在同一个插件中，由模型调用工具读取正文；教学版在本章的最小模型循环中直接注册该工具 |
 
 ## 练习
 

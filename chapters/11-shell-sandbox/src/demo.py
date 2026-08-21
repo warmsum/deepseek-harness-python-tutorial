@@ -1,83 +1,77 @@
-"""第 11 章 demo：命令执行的边界与审批。
-
-运行（无需 API，纯本地；审批用脚本化的「模拟用户」回答）：
-    uv run python chapters/11-shell-sandbox/src/demo.py
-
-四节：
-① 只读命令放行（ls 成功，输出被捕获）
-② read-only 模式拒绝写类命令（rm 被模式门挡住）
-③ 审批流：ask + 模拟用户拒绝 / 批准；never 策略直接拒绝
-④ 一次性授权：grant_once 后同一条命令放行，再用一次就失效
-"""
+"""第 11 章：模型请求命令，审批通过后才真正执行。"""
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Any
 
-from shell import (
-    APPROVAL_ALLOWED_ONCE,
-    APPROVAL_REJECTED,
-    POLICY_NEVER,
-    ShellPolicy,
-)
+from agent import DeepSeekClient, Tool, run_agent
+from shell import APPROVAL_ALLOWED_ONCE, APPROVAL_REJECTED, ShellPolicy
 
-
-def section(title: str) -> None:
-    print(f"\n━━━ {title} ━━━")
+ALLOWED_COMMANDS = {
+    "echo approved > approved.txt",
+    "cat approved.txt",
+}
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp) / "workspace"
         workspace.mkdir()
-        (workspace / "precious.txt").write_text("重要数据\n", encoding="utf-8")
 
-        # 模拟用户：对任何命令都说「拒绝」（安全的默认）
-        policy = ShellPolicy(mode="read-only", approver=lambda cmd: APPROVAL_REJECTED)
+        def approve(command: str) -> str:
+            outcome = (
+                APPROVAL_ALLOWED_ONCE
+                if command in ALLOWED_COMMANDS
+                else APPROVAL_REJECTED
+            )
+            print(f"审批请求: {command} -> {outcome}")
+            return outcome
 
-        section("① 只读命令：模式门放行")
-        result = policy.execute("ls -1", cwd=str(workspace))
-        print(f"  exit={result.exit_code}")
-        print(f"  stdout:\n{result.stdout.strip()}")
-        print(f"  stderr: {result.stderr.strip() or '(空)'}")
+        policy = ShellPolicy(mode="workspace-write", approver=approve)
 
-        section("② read-only 模式拒绝写类命令")
-        result = policy.execute("rm -f precious.txt", cwd=str(workspace))
-        print(f"  stderr: {result.stderr.strip()}")
-        print(f"  文件还在吗: {(workspace / 'precious.txt').exists()}")
+        def execute(arguments: dict[str, Any]) -> str:
+            command = arguments.get("command")
+            if not isinstance(command, str) or not command:
+                raise ValueError("command 必须是非空字符串")
+            result = policy.execute(command, cwd=str(workspace), timeout_seconds=5)
+            return (
+                f"exit_code={result.exit_code}\n"
+                f"stdout={result.stdout.strip() or '(空)'}\n"
+                f"stderr={result.stderr.strip() or '(空)'}"
+            )
 
-        section("③ 审批流：ask + 模拟用户（workspace-write 模式）")
-        # 模拟用户拒绝
-        refusing = ShellPolicy(
-            mode="workspace-write", approver=lambda cmd: APPROVAL_REJECTED
+        shell_tool = Tool(
+            "shell",
+            "在当前工作区执行终端命令。所有命令都必须经过审批。",
+            {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+            execute,
         )
-        denied = refusing.execute("rm -f precious.txt", cwd=str(workspace))
-        print(f"  [用户拒绝] {denied.stderr.strip()}")
-        # 换成「批准的模拟用户」
-        permissive = ShellPolicy(
-            mode="workspace-write", approver=lambda cmd: APPROVAL_ALLOWED_ONCE
+        result = run_agent(
+            DeepSeekClient(),
+            [shell_tool],
+            (
+                "你是命令执行助手。必须调用 shell，且只能使用用户给出的精确命令。"
+                "命令能否执行由审批策略决定。"
+            ),
+            (
+                "请依次执行精确命令 `echo approved > approved.txt` 和 "
+                "`cat approved.txt`，再根据真实结果回答。"
+            ),
         )
-        allowed = permissive.execute("rm -f precious.txt", cwd=str(workspace))
-        print(f"  [用户批准] exit={allowed.exit_code}，文件还在吗: {(workspace / 'precious.txt').exists()}")
-        # never 策略：连审批都不问
-        never = ShellPolicy(mode="workspace-write", approval_policy=POLICY_NEVER)
-        result = never.execute("ls", cwd=str(workspace))
-        print(f"  [never 策略] {result.stderr.strip()}")
 
-        section("④ 一次性授权：grant_once 用后即焚")
-        (workspace / "precious.txt").write_text("重要数据\n", encoding="utf-8")
-        once = ShellPolicy(
-            mode="read-only",  # 只读模式 + 写命令：本会被模式门拒绝
-            approval_policy=POLICY_NEVER,  # 票据优先于模式门与审批
-        )
-        once.grant_once("rm -f precious.txt")
-        first = once.execute("rm -f precious.txt", cwd=str(workspace))
-        print(f"  第 1 次执行（持票据）: exit={first.exit_code}，文件还在吗: {(workspace / 'precious.txt').exists()}")
-        (workspace / "precious.txt").write_text("重要数据\n", encoding="utf-8")
-        second = once.execute("rm -f precious.txt", cwd=str(workspace))
-        print(f"  第 2 次执行（票据已焚）: {second.stderr.strip()}")
-        print(f"  文件还在吗: {(workspace / 'precious.txt').exists()}")
+        print("\n=== 模型发起的命令 ===")
+        for trace in result.traces:
+            print(f"{trace.name}({trace.arguments})")
+            print(trace.result)
+        print(f"\n模型最终回答: {result.final_text}")
+        created = workspace / "approved.txt"
+        print(f"文件是否由获批命令创建: {created.exists()}")
 
 
 if __name__ == "__main__":

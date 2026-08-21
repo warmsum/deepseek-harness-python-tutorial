@@ -1,96 +1,125 @@
-"""第 10 章 demo：文件工具的完整旅程。
-
-运行（无需 API，纯本地）：
-    uv run python chapters/10-filesystem/src/demo.py
-
-旅程：读文件 → 未读就改（拒绝）→ 歧义编辑 → replace_all →
-外部修改（mtime 变化）→ 写被拒 → 重读后写成功 → grep/glob →
-逃出工作区（沙箱拒绝）→ 升级审批。
-"""
+"""第 10 章：模型真实调用文件工具完成一次受约束的修改。"""
 
 from __future__ import annotations
 
 import tempfile
-import time
 from pathlib import Path
+from typing import Any
 
+from agent import DeepSeekClient, Tool, run_agent
 from fs_tools import ObservationTracker, edit_file, glob, grep, read_file, write_file
-from sandbox import (
-    DANGER_FULL_ACCESS,
-    WORKSPACE_WRITE,
-    SandboxDeniedError,
-    SandboxPolicy,
-    approve_escalation,
-)
+from sandbox import WORKSPACE_WRITE, SandboxPolicy
 
 
-def section(title: str) -> None:
-    print(f"\n━━━ {title} ━━━")
+def _path(workspace: Path, arguments: dict[str, Any]) -> Path:
+    raw = arguments.get("path")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("path 必须是非空字符串")
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else workspace / candidate
+
+
+def build_tools(
+    workspace: Path, policy: SandboxPolicy, tracker: ObservationTracker
+) -> list[Tool]:
+    return [
+        Tool(
+            "read",
+            "读取工作区文件。修改已有文件前必须先调用 read。",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            lambda args: read_file(_path(workspace, args), tracker),
+        ),
+        Tool(
+            "write",
+            "创建文件或覆盖已经读取且未被外部修改的文件。",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+            lambda args: write_file(
+                _path(workspace, args), str(args["content"]), policy, tracker
+            ),
+        ),
+        Tool(
+            "edit",
+            "替换文件中的一段原文；文件必须先读取。",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+            lambda args: edit_file(
+                _path(workspace, args),
+                str(args["old_string"]),
+                str(args["new_string"]),
+                policy,
+                tracker,
+                bool(args.get("replace_all", False)),
+            ),
+        ),
+        Tool(
+            "grep",
+            "在工作区文本文件中搜索正则表达式。",
+            {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"],
+            },
+            lambda args: grep(workspace, str(args["pattern"])),
+        ),
+        Tool(
+            "glob",
+            "按 glob 模式列出工作区文件。",
+            {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"],
+            },
+            lambda args: glob(workspace, str(args["pattern"])),
+        ),
+    ]
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        ws = Path(tmp) / "workspace"
-        ws.mkdir()
-        (ws / "notes.txt").write_text("第一行：hello\n第二行：world\n", encoding="utf-8")
-        (ws / "todo.txt").write_text("学习 sandbox\n学习 subagent\n", encoding="utf-8")
-        policy = SandboxPolicy(mode=WORKSPACE_WRITE, workspace_root=ws)
+        workspace = Path(tmp) / "workspace"
+        workspace.mkdir()
+        target = workspace / "todo.txt"
+        target.write_text("学习 sandbox\n学习 subagent\n", encoding="utf-8")
+        policy = SandboxPolicy(WORKSPACE_WRITE, workspace)
         tracker = ObservationTracker()
-
-        section("1. read_file：带行号 + 页脚")
-        print(read_file(ws / "notes.txt", tracker))
-
-        section("2. 观察策略：没读过的文件不许改")
-        try:
-            edit_file(ws / "todo.txt", "学习", "复习", policy, tracker)
-        except PermissionError as e:
-            print(f"  {e}")
-
-        section("3. 歧义编辑：old_string 匹配多处")
-        tracker.record_read(ws / "todo.txt")
-        try:
-            edit_file(ws / "todo.txt", "学习", "复习", policy, tracker)
-        except ValueError as e:
-            print(f"  {e}")
-        print(
-            "  "
-            + edit_file(
-                ws / "todo.txt", "学习", "复习", policy, tracker, replace_all=True
-            )
+        result = run_agent(
+            DeepSeekClient(),
+            build_tools(workspace, policy, tracker),
+            (
+                f"你是文件维护助手。工作区是 {workspace}。路径优先使用相对路径。"
+                "修改已有文件前必须先 read，修改后再次 read 确认。"
+            ),
+            (
+                "请实际使用文件工具：读取 todo.txt，把唯一的“学习 sandbox”改为"
+                "“复习 sandbox”，然后重新读取并汇报结果。不要只描述操作。"
+            ),
         )
 
-        section("4. 外部修改：读后写不是盲写（mtime CAS）")
-        data = ws / "data.csv"
-        data.write_text("name,score\n", encoding="utf-8")
-        tracker.record_read(data)
-        print(read_file(data, tracker))
-        time.sleep(0.01)
-        data.write_text("name,score\nexternal,edit\n", encoding="utf-8")  # 模拟外部修改
-        try:
-            write_file(data, "name,score\nmini,200\n", policy, tracker)
-        except PermissionError as e:
-            print(f"  {e}")
-        print("  重新读取后：")
-        print(read_file(data, tracker))
-        print("  " + write_file(data, "name,score\nmini,200\n", policy, tracker))
-
-        section("5. grep 与 glob")
-        print(f"  grep 'sandbox':\n{grep(ws, 'sandbox')}")
-        print(f"  glob '*.txt':\n{glob(ws, '*.txt')}")
-
-        section("6. 逃出工作区：沙箱拒绝")
-        try:
-            # 目标在临时目录之外（家目录）——两个可写根都够不着
-            write_file(Path.home() / ".mini-harness-escape-test.txt", "越界", policy, tracker)
-        except SandboxDeniedError as e:
-            print(f"  {e}")
-
-        section("7. 升级审批：严格更宽")
-        try:
-            approve_escalation(policy, DANGER_FULL_ACCESS)
-            print("  升级到 danger-full-access：获批（教学版直接放行）")
-        except SandboxDeniedError as e:
-            print(f"  {e}")
+        print("=== 模型发起的文件操作 ===")
+        for trace in result.traces:
+            print(f"{trace.name}({trace.arguments})")
+            print(trace.result)
+        print(f"\n模型最终回答: {result.final_text}")
+        print(f"\n磁盘最终内容:\n{target.read_text(encoding='utf-8')}")
 
 
 if __name__ == "__main__":

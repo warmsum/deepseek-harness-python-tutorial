@@ -1,8 +1,8 @@
 # 05｜会话日志
 
-> 预计时间：60 分钟 ｜ 前置：完成第 02 章 ｜ 本章调用真实 DeepSeek 模型
+> 预计时间：60 分钟 ｜ 前置：完成第 04 章 ｜ 本章调用真实 DeepSeek 模型
 
-第 02 章用一个 `list[Message]` 保存对话历史，循环直接修改这个列表，再把它发送给模型。这个设计适合最小示例，但随着智能体能力增加，会出现三个问题：
+第 03、04 章解决了智能体能力增多后怎样组织和协作。现在回到第 02 章留下的运行循环：它用一个 `list[Message]` 保存对话历史，循环直接修改这个列表，再把它发送给模型。这个设计适合最小示例，但随着智能体持续运行，会出现三个问题：
 
 1. 不是所有历史都该给模型看。一次真实运行会产生大量过程记录：流式分片、生命周期边界、压缩动作。它们要留存，但发给模型只会浪费 token、制造噪音。
 2. 同一份历史有多种用途。模型请求要读取它，持久化功能要把它写入磁盘，界面要展示它，程序恢复时还要重新载入它。如果每个功能各存一份，内容很容易不同步。
@@ -240,7 +240,7 @@ uv run python chapters/05-session-log/src/demo.py
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
 | [`packages/core/session/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/session/README.zh.md) | `Session` | 与官方一样使用事件重建状态，在追加事件时复制并冻结数据，外部代码不能修改事件快照 |
-| 同上 | `derive_messages` | 官方使用增量投影，每个派生视图（surface）节点只处理一次；教学版每次重新处理全部事件，长会话成本更高 |
+| 同上 | `derive_messages` | 官方使用增量投影，每个派生视图节点只处理一次；教学版每次重新处理全部事件，长会话成本更高 |
 | 同上 | `subscribe` | 官方持久化插件订阅 `session/event`，需要保存时再写入磁盘；第 08 章实现文件存储 |
 | [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | 运行过程日志 | 官方同样把已经接收的消息、请求边界和工具调用写入日志，并在后续步骤重建模型输入 |
 

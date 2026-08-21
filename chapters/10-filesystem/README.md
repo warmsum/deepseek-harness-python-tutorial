@@ -1,8 +1,8 @@
 # 10｜文件系统
 
-> 预计时间：70 分钟 ｜ 前置：完成第 02 章（回归工具主线） ｜ 本章纯本地运行，不调用模型
+> 预计时间：70 分钟 ｜ 前置：完成第 09 章 ｜ 本章调用真实 DeepSeek 模型
 
-第 02 章的 calculator 是一个纯函数工具：接收参数、返回结果，不修改外部环境。文件工具则会读取和改写真实代码库，因此需要额外处理两个问题：
+前九章已经建立了模型调用、工具循环、会话和上下文控制，但示例工具大多只在内存中返回结果。真正处理开发任务时，智能体还要读取和修改文件。和第 02 章的 calculator 这种纯函数工具相比，文件工具会改动外部环境，因此需要额外处理两个问题：
 
 1. 边界。智能体能写哪些文件？代码缺陷或恶意提示会不会让它修改工作区之外的内容？
 2. 并发。智能体读取文件后、写回之前，用户自己修改了同一个文件，怎样避免覆盖用户的新内容？
@@ -16,7 +16,8 @@
 - 说明 `read-only`、`workspace-write` 与 `danger-full-access` 三种模式的边界；
 - 在写文件前规范化路径，并拒绝工作区之外的目标；
 - 用读后写检查发现未读取文件和过期版本；
-- 实现 read、write、edit、grep 与 glob 这组基础文件工具。
+- 实现 read、write、edit、grep 与 glob 这组基础文件工具；
+- 把文件函数注册为模型工具，让模型在同一条流程中读取、修改并复查文件。
 
 ## 10.1 两道保护：限制范围，检查变化
 
@@ -146,65 +147,68 @@ def edit_file(path, old_string, new_string, policy, tracker, replace_all=False):
 
 `grep` 与 `glob` 是搜索工具，正则搜内容、模式找文件，完整实现见源码。
 
-## 10.5 运行完整示例
+## 10.5 让模型实际使用文件工具
+
+`fs_tools.py` 负责文件行为，`demo.py` 再把五个函数包装成第 02 章的 `Tool`。每个包装函数都会补上工作区路径、`SandboxPolicy` 和共享的 `ObservationTracker`：
+
+```python
+Tool(
+    "edit",
+    "替换文件中的一段原文；文件必须先读取。",
+    {...},
+    lambda args: edit_file(
+        _path(workspace, args),
+        str(args["old_string"]),
+        str(args["new_string"]),
+        policy,
+        tracker,
+        bool(args.get("replace_all", False)),
+    ),
+)
+```
+
+系统提示词告诉模型工作区位置，以及“修改已有文件前必须先读取，修改后再次读取确认”。这不是安全边界本身：真正的约束仍由工具中的围栏和观察器执行。即使模型跳过读取或给出越界路径，工具也会拒绝操作，并把错误结果送回下一次模型请求。
+
+`agent.py` 保留一个最小的真实模型循环。它发送工具说明，接收模型给出的 `tool_calls`，执行对应函数，再把每项结果作为 `role="tool"` 消息送回模型。这样，本章不是单独调用几个文件函数，而是让模型根据每一步真实结果决定后续操作。
+
+## 10.6 运行完整示例
 
 ```bash
 uv run python chapters/10-filesystem/src/demo.py
 ```
 
-完整输出，本地确定性运行，临时路径随系统变化：
+下面是一次真实运行的主要输出，模型回答中间的分步说明已省略。临时路径和最终表述可能变化：
 
 ```
-━━━ 1. read_file：带行号 + 页脚 ━━━
-   1: 第一行：hello
-   2: 第二行：world
+=== 模型发起的文件操作 ===
+read({'path': 'todo.txt'})
+   1: 学习 sandbox
+   2: 学习 subagent
+
+(End of file - total 2 lines)
+edit({'path': 'todo.txt', 'old_string': '学习 sandbox', 'new_string': '复习 sandbox'})
+updated …/workspace/todo.txt (1 处替换)
+read({'path': 'todo.txt'})
+   1: 复习 sandbox
+   2: 学习 subagent
 
 (End of file - total 2 lines)
 
-━━━ 2. 观察策略：没读过的文件不许改 ━━━
-  [FS_NOT_OBSERVED] 修改 …/workspace/todo.txt 之前必须先 read 它
+模型最终回答: 任务完成。已读取 todo.txt，将“学习 sandbox”改为“复习 sandbox”，并重新读取确认。
 
-━━━ 3. 歧义编辑：old_string 匹配多处 ━━━
-  [FS_AMBIGUOUS_EDIT] old_string 在 …/workspace/todo.txt 中匹配了 2 处；请提供更具体的 old_string，或设置 replace_all=True
-  updated …/workspace/todo.txt (2 处替换)
-
-━━━ 4. 外部修改：读后写不是盲写（mtime CAS） ━━━
-   1: name,score
-
-(End of file - total 1 lines)
-  [FS_STALE_VERSION] …/workspace/data.csv 自上次读取后被外部修改（mtime 变化），请重新 read 后再写
-  重新读取后：
-   1: name,score
-   2: external,edit
-
-(End of file - total 2 lines)
-  written 20 chars to …/workspace/data.csv
-
-━━━ 5. grep 与 glob ━━━
-  grep 'sandbox':
-todo.txt:1: 复习 sandbox
-  glob '*.txt':
-notes.txt
-todo.txt
-
-━━━ 6. 逃出工作区：沙箱拒绝 ━━━
-  [sandbox: file access denied under workspace-write mode]: /Users/…/.mini-harness-escape-test.txt
-
-━━━ 7. 升级审批：严格更宽 ━━━
-  升级到 danger-full-access：获批（教学版直接放行）
+磁盘最终内容:
+复习 sandbox
+学习 subagent
 ```
 
-七部分输出覆盖了文件工具的一条完整路径。拒绝信息同时给出修正方向：文件未读取时先读；匹配不唯一时提供更具体的文本；文件已变化时重新读取；路径越界时改用允许的位置。
-
-## 10.6 在第 17 章中的使用方式
-
-第 17 章会把 `read`、`write`、`edit`、`grep` 和 `glob` 注册成五个模型工具。它们共享当前工作目录、`SandboxPolicy` 和 `ObservationTracker`。系统提示词也会告诉模型工作区位置、当前写入模式，以及“修改已有文件前必须先读取”的规则。因此，路径围栏和文件观察状态会在同一个智能体会话中持续生效。
+这次调用顺序不是 Python 代码预先写死的。模型先选择 `read`，获得带行号的真实内容后再选择 `edit`，最后再次 `read` 验证结果。三次调用共享同一个观察器，因此编辑时能够确认文件已经读取且没有被外部修改。围栏、歧义编辑、过期版本和越界拒绝仍由相同工具代码处理；可以在练习中修改任务提示，观察模型收到错误结果后如何修正调用。
 
 ## 本章小结
 
 - `SandboxPolicy.fence_write`：三模式、可写根集合、resolve 规范化、结构化拒绝
 - `ObservationTracker`：读取时记录修改时间，写入前检查文件是否变化
 - 五个工具：read 带行号与页脚并记录观察，write 全量写入，edit 唯一匹配 str-replace，grep 搜内容，glob 找文件
+- 真实模型流程：工具调用、文件结果回灌和修改后复查位于同一个循环中
 - 升级审批：严格更宽表
 
 ## 对照官方

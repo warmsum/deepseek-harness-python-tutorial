@@ -365,16 +365,6 @@ class DeepSeekClient:
 
 要验证 `frozen` 的约束，可以打开 `demo.py`，恢复最后一段被注释掉的 `message.content = "篡改"`，再运行一次。程序会抛出 `FrozenInstanceError`。
 
-## 运行完整示例
-
-本章代码共两个文件，全部自包含，使用 `httpx`、`httpx-sse` 与 `python-dotenv`。在项目根目录运行：
-
-```bash
-uv run python chapters/01-streaming-agent/src/demo.py
-```
-
-完整输出见本章开头的“先运行示例”。演示 2 会逐段显示文字；演示 3 保留相同的显示效果，但程序最终得到一条完整消息。
-
 ## 本章小结
 
 - `load_api_key()`：优先读取环境变量，再使用 `.env`，缺少密钥时明确报错

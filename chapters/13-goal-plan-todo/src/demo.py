@@ -1,21 +1,16 @@
-"""第 13 章 demo：Plan Mode、用户问答、Goal 与 todo。
-
-运行（无需 API，纯本地）：
-    uv run python chapters/13-goal-plan-todo/src/demo.py
-
-演示：
-1. 用户问答 seam 与 Plan Mode 的边界提交
-2. Goal 完整生命周期和 revision 守卫
-3. 事件溯源与回放
-4. todo 整体替换与校验
-"""
+"""第 13 章：模型真实使用问答、计划、目标和任务清单工具。"""
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from agent import run_agent
+from client import DeepSeekClient, Tool
 from goal import GoalStore
 from plan import PlanModeController, make_exit_plan_mode_tool
 from session import Session
-from todo import STATUS_IN_PROGRESS, TodoItem, todo_write
+from todo import TodoItem, todo_write
 from user_questions import (
     AnswerItem,
     QuestionAnswer,
@@ -25,163 +20,121 @@ from user_questions import (
 )
 
 
-class ApprovingProvider:
+class TeachingProvider:
+    """终端教学用回答器：普通问题选第一项，计划评审选择批准。"""
+
     def ask(self, request: QuestionRequest) -> QuestionAnswer:
         question = request.questions[0]
-        print(f"  provider 收到: {question.question}")
         selected = (question.options[0].label,) if question.options else ()
+        print(f"用户问答: {question.question} -> {selected[0] if selected else '(无选项)'}")
         return QuestionAnswer((AnswerItem(question.id, selected),))
-
-
-def section(title: str) -> None:
-    print(f"\n━━━ {title} ━━━")
-
-
-def show_goal(store: GoalStore) -> None:
-    goal = store.get()
-    if goal is None:
-        print("  （无目标）")
-        return
-    print(
-        f"  r{goal.revision} [{goal.phase}] rounds={goal.rounds_started}/{goal.max_rounds}"
-        f"  {goal.objective}"
-        + (f"  (blocked: {goal.blocker_reason})" if goal.blocker_reason else "")
-    )
 
 
 def main() -> None:
     session = Session()
-    store = GoalStore(session)
-
-    section("① 用户问答 + Plan Mode")
+    goals = GoalStore(session)
     questions = UserQuestionService()
-    questions.register_provider(ApprovingProvider())
+    questions.register_provider(TeachingProvider())
     plan_mode = PlanModeController(
         session,
-        "You are in plan mode. Explore and design before implementation.",
+        (
+            "当前处于计划模式。先澄清范围并形成计划，不要开始实施。"
+            "准备好完整计划后调用 exit_plan_mode 请求用户评审。"
+        ),
         questions,
     )
-    ask_tool = make_ask_user_tool(questions)
-    print(
-        "  ask_user_question → "
-        + ask_tool.execute(
+    plan_mode.set(True)
+
+    def create_goal(arguments: dict[str, Any]) -> str:
+        if plan_mode.get().active:
+            raise RuntimeError("必须先退出计划模式")
+        objective = arguments.get("objective")
+        if not isinstance(objective, str) or not objective.strip():
+            raise ValueError("objective 必须是非空字符串")
+        ref = goals.create(objective, max_rounds=5)
+        return json.dumps({"id": ref.id, "revision": ref.revision}, ensure_ascii=False)
+
+    def write_todos(arguments: dict[str, Any]) -> str:
+        if plan_mode.get().active:
+            raise RuntimeError("必须先退出计划模式")
+        if goals.get() is None:
+            raise RuntimeError("必须先创建目标")
+        raw_items = arguments.get("todos")
+        if not isinstance(raw_items, list):
+            raise TypeError("todos 必须是数组")
+        items = [
+            TodoItem(str(item["content"]), str(item["status"]))
+            for item in raw_items
+            if isinstance(item, dict)
+        ]
+        if len(items) != len(raw_items):
+            raise ValueError("每个 todo 必须是对象")
+        return todo_write(session, items, allow_parallel_in_progress=False)
+
+    tools = [
+        make_ask_user_tool(questions),
+        make_exit_plan_mode_tool(plan_mode),
+        Tool(
+            "create_goal",
+            "退出计划模式后，创建唯一的长期目标。",
             {
-                "questions": [
-                    {
-                        "id": "scope",
-                        "question": "是否只迁移公开接口？",
-                        "options": [{"label": "是"}, {"label": "否"}],
+                "type": "object",
+                "properties": {"objective": {"type": "string"}},
+                "required": ["objective"],
+            },
+            create_goal,
+        ),
+        Tool(
+            "todo_write",
+            "退出计划模式并创建目标后，整体写入当前任务清单。",
+            {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                },
+                            },
+                            "required": ["content", "status"],
+                        },
                     }
-                ]
-            }
-        )
+                },
+                "required": ["todos"],
+            },
+            write_todos,
+        ),
+    ]
+    result = run_agent(
+        DeepSeekClient(),
+        session,
+        plan_mode,
+        tools,
+        (
+            "请为“把旧工具迁移到新框架”建立任务状态。严格按顺序："
+            "先用 ask_user_question 确认是否只迁移公开接口；再用 exit_plan_mode "
+            "提交 Markdown 计划；获批后用 create_goal 建立目标；最后用 todo_write "
+            "写入 3 项清单，其中第一项 in_progress，其余 pending，然后总结。"
+        ),
     )
-    print(f"  set(on) → {plan_mode.set(True)}")
-    session.append("turn/start", {"turn": 1})
-    exit_tool = make_exit_plan_mode_tool(plan_mode)
+
+    print("\n=== 模型调用的任务工具 ===")
+    for trace in result.traces:
+        print(f"{trace.name}({trace.arguments})")
+        print(trace.result)
+    print(f"\n模型最终回答:\n{result.final_text}")
+    current = goals.get()
     print(
-        "  exit_plan_mode → "
-        + exit_tool.execute(
-            {"plan": "# 迁移计划\n\n先检查公开接口，再实现，最后验证。"}
-        )
+        "\n日志恢复出的目标: "
+        + (f"r{current.revision} [{current.phase}] {current.objective}" if current else "无")
     )
-    print(f"  评审后: active={plan_mode.get().active}, pending={plan_mode.get().pending}")
-    plan_mode.apply_boundary()
-    print(f"  下一 step: active={plan_mode.get().active}")
-    session.append("turn/end", {"turn": 1, "reason": "completed"})
-
-    section("② Goal 生命周期")
-    ref = store.create("把内部工具迁移到新框架", max_rounds=5)
-    print("  create → ")
-    show_goal(store)
-
-    store.admit_round()  # 模拟一轮目标工作完成
-    print("  admit_round → ")
-    show_goal(store)
-    ref = store.get_ref()  # admit_round 不推进 revision；取回当前引用便于继续演示
-
-    ref = store.pause(ref)
-    print("  pause → ")
-    show_goal(store)
-
-    ref = store.resume(ref)
-    print("  resume → ")
-    show_goal(store)
-
-    ref = store.block(ref, "依赖上游发布")
-    print("  block → ")
-    show_goal(store)
-
-    ref = store.resume(ref)
-    print("  resume（清除阻塞原因）→ ")
-    show_goal(store)
-
-    store.complete(ref)
-    print("  complete → ")
-    show_goal(store)
-
-    section("③ revision 守卫：过期引用被拒绝")
-    try:
-        store.create("第二个目标", max_rounds=3)
-        stale_ref = ref  # 上一步 complete 之后的旧引用
-        store.edit(stale_ref, "改文本")
-    except ValueError as e:
-        print(f"  {e}")
-
-    section("④ 事件溯源：goal/change 事件与连续性回放")
-    for event in session.events:
-        if event.type == "goal/change":
-            data = event.data
-            if data["operation"] == "clear":
-                print(f"  #{event.id:<2} goal/change clear")
-            else:
-                goal = data["goal"]
-                print(
-                    f"  #{event.id:<2} goal/change {data['operation']} "
-                    f"r{goal['revision']} [{goal['phase']}]"
-                )
-    replayed = GoalStore.replay(session)
-    current = replayed.get()
-    assert current is not None
-    print(f"  回放后的当前目标: r{current.revision} [{current.phase}]")
-    print("  ← 目标状态只由事件派生：日志是唯一持久权威")
-
-    section("⑤ todo：整体替换与校验")
-    print(
-        "  "
-        + todo_write(
-            session,
-            [TodoItem("写第 01 章", STATUS_IN_PROGRESS)],
-            allow_parallel_in_progress=False,
-        )
-    )
-    print(
-        "  "
-        + todo_write(
-            session,
-            [
-                TodoItem("写第 01 章", STATUS_IN_PROGRESS),
-                TodoItem("写第 02 章", "pending"),
-            ],
-            allow_parallel_in_progress=False,
-        )
-    )
-    print(
-        "  "
-        + todo_write(
-            session,
-            [TodoItem("写第 01 章", "pending"), TodoItem("写第 01 章", "pending")],
-            allow_parallel_in_progress=False,
-        )
-    )
-    print(
-        "  "
-        + todo_write(
-            session,
-            [TodoItem("写第 01 章", "doing")],
-            allow_parallel_in_progress=False,
-        )
-    )
+    todo_events = [event for event in session.events if event.type == "todo/write"]
+    print(f"日志中的任务清单写入次数: {len(todo_events)}")
 
 
 if __name__ == "__main__":

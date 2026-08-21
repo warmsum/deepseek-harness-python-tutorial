@@ -1,8 +1,8 @@
 # 08｜会话持久化
 
-> 预计时间：50 分钟 ｜ 前置：完成第 05 章 ｜ 本章纯本地运行，不调用模型
+> 预计时间：50 分钟 ｜ 前置：完成第 07 章 ｜ 本章调用真实 DeepSeek 模型
 
-第 05 章的会话日志目前只保存在内存中，程序退出后历史就会丢失。要支持崩溃恢复、稍后继续或迁移会话，事件日志必须写入磁盘。本章实现一个文件存储，并说明第 05 章 `subscribe` 接口如何用于增量持久化。
+第 05–07 章已经用事件日志记录模型与工具的运行过程，并让智能体能够连续处理多轮任务。不过，这些日志仍只保存在内存中，程序退出后历史就会丢失。要支持崩溃恢复、稍后继续或迁移会话，事件日志必须写入磁盘。本章实现一个文件存储，并说明第 05 章的 `subscribe` 接口如何用于增量持久化。
 
 本章使用 JSONL 保存日志。JSONL 文件的第一行记录格式和版本，之后每行保存一个 JSON 对象。它既方便直接打开检查，也允许程序只在文件末尾追加新事件；即使最后一行没有写完，前面的完整记录通常仍可读取。
 
@@ -111,49 +111,68 @@ class CheckpointPolicy:
 
 四个方法都会把保存错误交给调用方。保存失败时，程序停止调用模型、执行工具或进入重试等待。这种“检查失败就停止”的策略称为 fail closed。检查点能保证操作意图先于动作写入磁盘，便于恢复时判断程序运行到了哪里；但它不能保证外部操作只发生一次，因为程序仍可能在远端写入已经成功、结果事件尚未保存时退出。
 
-## 8.5 运行完整示例
+## 8.5 把检查点接入模型与工具循环
+
+存储能力只有进入实际运行流程，才能回答“应该在什么时候保存”。`agent.py` 保留第 02、05 章已经讲过的最小模型与工具循环，并在模型请求和工具执行之前调用检查点：
+
+```python
+session.append("request/header", {"model": client.model, "tools": [tool.name]})
+checkpoint.before_model(session)
+reply = client.chat(messages, [tool])
+session.append("assistant/message", {...})
+
+for call in reply.tool_calls:
+    session.append("tool/call", {...})
+    checkpoint.before_tool(session)
+    result = tool.execute(arguments)
+    session.append("tool/result", {...})
+```
+
+这段顺序保证模型请求前已经保存请求依据，工具执行前已经保存调用意图。模型回复和工具结果进入事件日志后，下一步骤开始前还会再次保存。`client.py` 是前面模型通信代码的最小副本，使本章能够单独运行；本章新增的重点仍是 `JsonlStore` 和 `CheckpointPolicy`。
+
+示例让模型计算 `(18 + 6) / 3`。模型必须调用 `calculator`，因此一轮真实任务会同时经过模型边界、工具边界、事件追加和 JSONL 写入。任务完成后，程序从同一文件恢复会话，再在文件末尾追加半条 JSON，验证加载器只移除这段没有写完的内容。
+
+## 8.6 运行完整示例
 
 ```bash
 uv run python chapters/08-persistence/src/demo.py
 ```
 
-完整输出，本地确定性运行，时间戳会变：
+下面是一次真实运行的主要输出，模型回答中间的解释已省略。回答措辞可能变化，事件顺序由程序控制：
 
 ```
-=== ① 落盘：磁盘上的 JSONL 原文 ===
-  {"format": "mini-harness-jsonl", "version": 1}
-  {"id": 0, "type": "turn/start", "ts": ..., "data": {"turn": 1}}
-  {"id": 1, "type": "user/message", "ts": ..., "data": {"content": "1+2*3 等于几？"}}
-  {"id": 2, "type": "assistant/message", "ts": ..., "data": {"content": null, "tool_call…
-  {"id": 3, "type": "tool/result", "ts": ..., "data": {"call_id": "call_1", "content": "…
-  {"id": 4, "type": "assistant/message", "ts": ..., "data": {"content": "1+2*3 = 7"}}
-  {"id": 5, "type": "turn/end", "ts": ..., "data": {"turn": 1, "reason": "completed"}}
-  ← 首行 header，之后每行一条事件
+=== 真实模型任务：计算并持续保存会话 ===
+模型最终回答: 我使用了 calculator 工具来计算表达式 (18 + 6) / 3。
+最终结果是 8。
 
-=== ② 读回：重放一致性 ===
-  读回 6 条事件，类型序列与原始一致: True
+=== 磁盘中的真实事件顺序 ===
+#0  turn/start
+#1  user/message
+#2  step/start
+#3  request/header
+#4  assistant/message
+#5  tool/call
+#6  tool/result
+#7  step/end
+#8  step/start
+#9  request/header
+#10 assistant/message
+#11 step/end
+#12 turn/end
+恢复后消息数量: 4
 
-=== ③ checkpoint：工具意图先落盘，副作用后执行 ===
-  副作用前磁盘末事件: tool/call
-  ← flush 失败时，调用方不会进入工具正文
-
-=== ④ 模拟崩溃：最后一条 turn/end 还没写，进程就被杀 ===
-  #0  turn/start
-  #1  user/message
-  #2  assistant/message
-  #3  tool/result
-  #4  assistant/message
-  #5  turn/end  ← 合成收尾
-  ← 残缺尾行被截断，缺失的轮次收尾被合成 turn/end 补上
+=== 使用同一日志模拟未完成写入 ===
+残缺尾行已移除，最后事件仍是: turn/end
 ```
 
-第 ③ 节先追加一个 `tool/call`，通过 `CheckpointPolicy` 保存，再读回磁盘确认工具调用意图已经存在。第 ④ 节由示例主动制造损坏：先删除最后一行 `turn/end`，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断残缺片段，并在返回的内存 `Session` 中补充结束事件。即使磁盘末尾是完整行，只要工具、步骤或轮次仍未结束，也会进行相同处理。这些补充事件不会在 `load()` 中自动写回，只有调用方随后执行 `save()` 时才会追加到磁盘。
+第一次模型回复提出工具调用，第二次模型回复给出最终答案，因此日志中出现两个步骤。`derive_messages()` 恢复出用户消息、带工具调用的助手消息、工具结果和最终助手消息，共 4 条。最后追加的残缺 JSON 没有换行，加载器能够确认它是未完成写入并安全截断；前面的 `turn/end` 保持不变。如果完整日志停在开放的工具调用、步骤或轮次中，加载器还会在内存会话中补充异常收尾，下一次 `save()` 才会把这些事件写回磁盘。
 
 ## 本章小结
 
 - `JsonlStore.save()`：首次原子发布、前缀校验、后续仅追加
 - `JsonlStore.load()`：严格校验文件头和事件，只截断末尾未写完的片段，并为未结束的工具、步骤和轮次补充收尾
 - `CheckpointPolicy`：在模型请求、顶层工具、下一步骤和重试等待前保存，保存失败就停止后续操作
+- 真实任务路径：模型调用计算器的同时持续写入事件，并从同一份 JSONL 恢复消息
 - 恢复过程：检查文件、修复可以确认的残缺内容，再由 `from_log` 校验事件连续性
 
 ## 对照官方

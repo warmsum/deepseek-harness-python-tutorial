@@ -1,11 +1,8 @@
-"""第 08 章复用的 DeepSeek 客户端、消息与工具结构。
-
-模型—工具协议已在第 02 章讲解。本章保留一份可独立运行的最小副本，
-把重点放在会话何时写入磁盘，而不是跨章节导入隐藏实现。
-"""
+"""第 12 章复用的真实模型—工具循环。"""
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,14 +14,11 @@ from dotenv import dotenv_values
 
 
 def load_api_key() -> str:
-    """优先读取进程环境，其次读取项目根目录的 .env。"""
-    from_env = os.getenv("DEEPSEEK_API_KEY")
-    if from_env:
-        return from_env
-    env_path = Path(__file__).resolve().parents[3] / ".env"
-    from_file = dotenv_values(env_path).get("DEEPSEEK_API_KEY")
-    if from_file:
-        return from_file
+    key = os.getenv("DEEPSEEK_API_KEY") or dotenv_values(
+        Path(__file__).resolve().parents[3] / ".env"
+    ).get("DEEPSEEK_API_KEY")
+    if key:
+        return key
     raise RuntimeError("找不到 DEEPSEEK_API_KEY：请参考 .env.example 创建 .env")
 
 
@@ -52,15 +46,25 @@ class Tool:
     execute: Callable[[dict[str, Any]], str]
 
 
-class DeepSeekClient:
-    BASE_URL = "https://api.deepseek.com"
+@dataclass(frozen=True)
+class ToolTrace:
+    name: str
+    arguments: dict[str, Any]
+    result: str
 
-    def __init__(self, api_key: str | None = None, model: str = "deepseek-chat") -> None:
+
+@dataclass(frozen=True)
+class AgentResult:
+    final_text: str
+    traces: tuple[ToolTrace, ...]
+
+
+class DeepSeekClient:
+    def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or load_api_key()
-        self.model = model
 
     @staticmethod
-    def _wire_message(message: Message) -> dict[str, Any]:
+    def _wire(message: Message) -> dict[str, Any]:
         wire: dict[str, Any] = {"role": message.role}
         if message.content is not None:
             wire["content"] = message.content
@@ -77,14 +81,14 @@ class DeepSeekClient:
                 }
                 for call in message.tool_calls
             ]
-        if message.tool_call_id is not None:
+        if message.tool_call_id:
             wire["tool_call_id"] = message.tool_call_id
         return wire
 
     def chat(self, messages: list[Message], tools: list[Tool]) -> Message:
         payload = {
-            "model": self.model,
-            "messages": [self._wire_message(message) for message in messages],
+            "model": "deepseek-chat",
+            "messages": [self._wire(message) for message in messages],
             "tools": [
                 {
                     "type": "function",
@@ -99,23 +103,53 @@ class DeepSeekClient:
         }
         with httpx.Client(timeout=60) as http:
             response = http.post(
-                f"{self.BASE_URL}/chat/completions",
+                "https://api.deepseek.com/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json=payload,
             )
             response.raise_for_status()
             raw = response.json()["choices"][0]["message"]
-        calls = tuple(
-            ToolCall(
-                id=item["id"],
-                name=item["function"]["name"],
-                arguments=item["function"]["arguments"],
-            )
-            for item in raw.get("tool_calls") or []
-        )
         return Message(
             role="assistant",
             content=raw.get("content"),
             reasoning_content=raw.get("reasoning_content"),
-            tool_calls=calls,
+            tool_calls=tuple(
+                ToolCall(
+                    item["id"],
+                    item["function"]["name"],
+                    item["function"]["arguments"],
+                )
+                for item in raw.get("tool_calls") or []
+            ),
         )
+
+
+def run_agent(
+    client: DeepSeekClient,
+    tools: list[Tool],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_steps: int = 6,
+) -> AgentResult:
+    history = [Message("system", system_prompt), Message("user", user_prompt)]
+    by_name = {tool.name: tool for tool in tools}
+    traces: list[ToolTrace] = []
+    for _ in range(max_steps):
+        reply = client.chat(history, tools)
+        history.append(reply)
+        if not reply.tool_calls:
+            return AgentResult(reply.content or "", tuple(traces))
+        for call in reply.tool_calls:
+            arguments: dict[str, Any] = {}
+            try:
+                raw = json.loads(call.arguments)
+                if not isinstance(raw, dict):
+                    raise TypeError("工具参数必须是 JSON 对象")
+                arguments = raw
+                result = by_name[call.name].execute(arguments)
+            except Exception as error:  # noqa: BLE001 - 工具边界把失败回灌给模型
+                result = f"工具执行出错: {error}"
+            traces.append(ToolTrace(call.name, arguments, result))
+            history.append(Message("tool", result, tool_call_id=call.id))
+    raise RuntimeError(f"模型在 {max_steps} 个步骤内没有结束")

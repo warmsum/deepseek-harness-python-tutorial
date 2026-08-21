@@ -1,8 +1,8 @@
 # 16｜配置与 RPC
 
-> 预计时间：55 分钟 ｜ 前置：完成第 07 章 ｜ 本章纯本地运行，不调用模型
+> 预计时间：55 分钟 ｜ 前置：完成第 15 章 ｜ 本章通过 JSON-RPC 调用真实 DeepSeek 模型
 
-当智能体需要被 IDE 插件、命令行工具或网页前端调用时，外部进程必须能够发送消息、查询状态并读取结果。这带来本章的两个主题：
+到第 15 章为止，智能体的运行流程和主要能力已经分别实现。要把它交给 IDE 插件、命令行工具或网页前端使用，还需要一个稳定的外部入口，让其他进程能够发送消息、查询状态并读取结果。这带来本章的两个主题：
 
 1. 配置：外部入口和智能体怎样共享同一套设置，避免各自使用不同值？
 2. RPC：两个进程怎样用统一格式发起调用、返回结果和报告错误？
@@ -17,7 +17,8 @@ RPC 是 Remote Procedure Call 的缩写，中文通常称为远程过程调用�
 - 使用不可变快照和版本号防止配置被误改或被旧数据覆盖；
 - 读懂 JSON-RPC 2.0 的请求、成功响应和错误响应；
 - 实现请求解析、方法注册与分发；
-- 把不可信输入转换成结构化协议错误，而不是让服务进程退出。
+- 把不可信输入转换成结构化协议错误，而不是让服务进程退出；
+- 让 `agent.run` 从当前配置读取模型和系统提示词，再返回真实模型结果。
 
 ## 16.1 配置为什么要分组和分层
 
@@ -136,41 +137,53 @@ def parse_request(text: str) -> RpcRequest | RpcError:
 
 这里区分解析失败、方法不存在、参数错误和处理器内部异常。所有路径都会返回 JSON-RPC 响应，使外部程序不会因为一次错误请求而失去连接。
 
-## 16.5 运行完整示例
+## 16.5 让 RPC 方法读取配置并调用模型
+
+只注册一个 `echo` 方法能够讲清分发格式，却看不到配置和智能体入口怎样真正连接。示例因此注册 `agent.run`：先校验外部传入的 `prompt`，再从 `agent` 命名空间读取模型与系统提示词，最后调用 DeepSeek。
+
+```python
+def run_agent(params: dict[str, Any]) -> dict[str, Any]:
+    prompt = params.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise TypeError("prompt 必须是非空字符串")
+    config = agent_settings.get()
+    model = config["model"]
+    system_prompt = config["system_prompt"]
+    content = DeepSeekClient(model).answer(system_prompt, prompt)
+    return {
+        "model": model,
+        "settings_revision": agent_settings.revision,
+        "content": content,
+    }
+```
+
+这里有两条边界。第一，RPC 参数是不可信输入，缺少 `prompt` 时抛出的 `TypeError` 会由分发器转换成编号为 -32602 的参数错误。第二，模型和系统提示词来自已经解析的配置快照，响应同时返回模型名与配置版本，调用方能够知道这次回答依据哪一版设置。
+
+`client.py` 只保留本章需要的最小非流式请求。它读取 `DEEPSEEK_API_KEY`，向 `/chat/completions` 发送系统消息和用户消息，并要求响应包含非空文本。模型请求失败时，分发器会返回内部错误；它不会把失败伪装成成功结果。
+
+## 16.6 运行完整示例
 
 ```bash
 uv run python chapters/16-settings-jsonrpc/src/demo.py
 ```
 
-完整输出，本地确定性运行：
+下面是一次真实运行。模型回答的具体措辞可能变化，JSON-RPC 外层结构保持不变：
 
 ```
-=== ① namespace + 三层配置 + revision ===
-  解析值: {'model': 'deepseek-chat', 'max_steps': 20}
-  ← 默认 model 被用户层覆盖，默认 max_steps 被 base 层覆盖
-  更新后: {'model': 'deepseek-v4-max', 'max_steps': 20}，revision=1
-  陈旧写入被拒绝: [SETTINGS_CONFLICT] settings namespace "agent" 已变化（期望 revision 0，当前 1）
+=== 外部请求先读取当前配置 ===
+→ {"jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"}}
+← {"jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-chat", "system_prompt": "你是简洁的 Python 教学助手，只回答一个自然段。", "language": "zh-CN"}}
 
-=== ② JSON-RPC 线格式往返 ===
-  → {"jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"}}
-  ← {"jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-v4-max", "max_steps": 20}}
-  → {"jsonrpc": "2.0", "id": 2, "method": "echo", "params": {"text": "你好"}}
-  ← {"jsonrpc": "2.0", "id": 2, "result": "你好"}
-  → {"jsonrpc": "2.0", "id": 3, "method": "unknown.tool", "params": {}}
-  ← {"jsonrpc": "2.0", "id": 3, "error": {"code": -32601, "message": "Method not found: unknown.tool"}}
-  → {"jsonrpc": "2.0", "id": 4, "method": "echo", "params": [1, 2]}
-  ← {"jsonrpc": "2.0", "id": 4, "error": {"code": -32602, "message": "Invalid params: 必须是 JSON 对象"}}
-  → {"id": 5, "method": "echo", "params": {"text": "缺 jsonrpc 版本"}}
-  ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid Request: jsonrpc 必须为 2.0"}}
-  → 这不是 JSON{{{
-  ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error: 不是合法 JSON"}}
+=== JSON-RPC 真实驱动模型 ===
+→ {"jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": {"prompt": "用一句通俗的话解释 Python 生成器。"}}
+← {"jsonrpc": "2.0", "id": 2, "result": {"model": "deepseek-chat", "settings_revision": 1, "content": "生成器就像个“懒人列表”——它不会一次性把所有数据都算好存起来，而是按需一个接一个地“现做现卖”，这样既省内存又省时间，特别适合处理海量数据或无限序列。"}}
+
+=== 非法请求仍返回结构化错误 ===
+→ {"jsonrpc": "2.0", "id": 3, "method": "agent.run", "params": {}}
+← {"jsonrpc": "2.0", "id": 3, "error": {"code": -32602, "message": "Invalid params: prompt 必须是非空字符串"}}
 ```
 
-六条请求分别演示正常读取配置、正常回声、未知方法、参数类型错误、缺少协议版本和无法解析的文本。每一条都得到结构化响应，包括最后两条无效输入。
-
-## 16.6 在第 17 章中的使用方式
-
-第 17 章会注册 `agent` 命名空间，并从 `.mini-harness/settings.json` 读取用户设置，统一得到文件权限、命令审批、技能目录、后台任务、工作流、模型重试和上下文控制等参数。`--rpc` 模式通过标准输入和标准输出逐行收发 JSON-RPC，目前提供 `settings.get`、`agent.run` 和 `plan.set` 三个方法，不监听网络端口。
+第一条请求证明外部调用方读到的是三层配置合并后的结果。第二条请求使用其中的 `deepseek-chat` 和系统提示词完成真实模型调用，并在协议结果中带回配置版本。第三条请求缺少必要参数，分发器返回结构化错误，进程仍可继续处理后续请求。
 
 ## 本章小结
 
@@ -179,6 +192,9 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 - `parse_request`：检查 JSON-RPC 2.0 请求格式，并把失败转换成结构化错误
 - `RpcDispatcher`：注册方法、查找处理函数并返回调用结果
 - 标准错误码：让调用方稳定地区分不同失败原因
+- `agent.run`：从配置快照读取模型参数，通过统一 RPC 响应返回真实模型结果
+
+至此，各项能力和外部入口都已经准备好。第 17 章不再单独增加一种工具，而是把前 16 章的组件装进同一个命令行智能体。
 
 ## 对照官方
 
