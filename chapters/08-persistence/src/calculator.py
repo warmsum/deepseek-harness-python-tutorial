@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import operator
 from collections.abc import Callable
+from math import isfinite
 from typing import Any
 
 from client import Tool
@@ -20,7 +21,11 @@ OPERATORS: dict[type[ast.operator], Callable[[float, float], float]] = {
 def _evaluate(node: ast.AST) -> float:
     if isinstance(node, ast.Expression):
         return _evaluate(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
         return float(node.value)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         return -_evaluate(node.operand)
@@ -34,7 +39,10 @@ def _run(arguments: dict[str, Any]) -> str:
     if not isinstance(expression, str) or not expression.strip():
         raise ValueError("expression 必须是非空字符串")
     tree = ast.parse(expression, mode="eval")
-    return str(_evaluate(tree))
+    result = _evaluate(tree)
+    if not isfinite(result):
+        raise ValueError("计算结果超出有限范围")
+    return str(result)
 
 
 calculator = Tool(

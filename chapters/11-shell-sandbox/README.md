@@ -79,13 +79,13 @@ def run_command(
 
 为什么还要提供 `use_shell=False`？因为文本白名单只能识别第一条命令。假如把 `ls; rm file` 交给 shell，第一词看起来是只读的 `ls`，后半句却会删除文件。因此，本章对 read-only 白名单命令关闭 shell 解析；只有经过更宽模式和审批的命令才使用完整 shell 语法。
 
-## 11.3 决策链：票据、模式门、审批
+## 11.3 决策链：一次性授权、运行模式、审批
 
 `ShellPolicy.decide` 按顺序检查三类规则，任一规则得出结论后立即返回：
 
 ```python
     def decide(self, command: str) -> tuple[bool, str]:
-        # 1) 一次性票据：绕过一切，用后即焚
+        # 1) 一次性授权：仅匹配当前完整命令，匹配后立即失效
         if self._granted_once == command:
             self._granted_once = None
             return True, "allowed-once（一次性授权）"
@@ -96,7 +96,7 @@ def run_command(
             return False, f"[sandbox] 无法解析命令: {error}"
         first_word = words[0] if words else ""
 
-        # 2) 模式门
+        # 2) 运行模式
         if self.mode == "read-only":
             if first_word in READ_ONLY_COMMANDS:
                 return True, "read-only 白名单放行"
@@ -119,9 +119,9 @@ def run_command(
 
 一次性授权最先检查。`grant_once(command)` 只对完全相同的一条命令生效，使用后立即失效。例如，模型在只读模式下请求执行写命令，用户可以只批准当前动作；后续写命令仍需重新判断。这种结果在代码中记为 `allowed-once`。
 
-模式检查发生在审批之前。read-only 模式下，白名单只做精确命令名匹配：`grep` 可以，`grep-and-delete` 不可以。放行后还会以 `shell=False` 执行，分号、管道和重定向只会成为普通参数，不能偷偷追加第二条命令。这里的白名单仍然只是教学近似，真实内核沙箱按系统调用产生的实际影响拦截，不依赖命令文本。
+模式检查发生在审批之前。read-only 模式下，白名单只做精确命令名匹配：`grep` 可以，`grep-and-delete` 不可以。放行后还会以 `shell=False` 执行，分号、管道和重定向只会成为普通参数，不能追加第二条命令。这里的白名单是教学近似，真实内核沙箱按系统调用产生的实际影响拦截，不依赖命令文本。
 
-审批采用“失败时默认拒绝”的原则，也称为 fail closed。`never` 策略直接拒绝；`ask` 策略调用审批函数，只有 `allowed-once` 会放行。审批通道不可用时，智能体停止当前动作，不会绕过检查继续执行。
+审批采用 fail closed 规则：`never` 策略直接拒绝；`ask` 策略调用审批函数，只有 `allowed-once` 会放行。审批通道不可用时，智能体停止当前动作。
 
 ## 11.4 从模型请求到审批和执行
 
@@ -175,7 +175,7 @@ stderr=(空)
 ## 本章小结
 
 - `run_command`：subprocess、cwd、timeout 与可选 shell 解析，超时转结构化结果
-- `ShellPolicy.decide`：票据、模式门、审批的三段决策链
+- `ShellPolicy.decide`：一次性授权、运行模式和审批组成的决策链
 - read-only 白名单使用精确命令名和 `shell=False`，拒绝命令拼接绕过
 - 审批结果：只有一次性允许会执行命令，审批失败或不可用时默认拒绝
 - 真实模型流程：模型提出命令，审批器决定是否放行，执行结果再返回模型
@@ -185,13 +185,13 @@ stderr=(空)
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/shell/bash-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/shell/bash-sandbox/README.zh.md) | `ShellPolicy` | 官方支持 danger-full-access，并明确沙箱只限制文件影响；教学版不实现内核隔离 |
-| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-approval/README.zh.md) | 审批链 | 官方定义四种审批结果以及询问和从不询问两种策略；教学版同样在审批失败时默认拒绝 |
-| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方通过 `exec.signal` 通知运行中的命令停止，教学版由 Python 子进程接口在超时后直接终止 |
+| [`packages/shell/bash-sandbox/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/shell/bash-sandbox/README.zh.md) | `ShellPolicy` | 官方支持 danger-full-access，并明确沙箱只限制文件影响；教学版不实现内核隔离 |
+| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/interaction/user-approval/README.zh.md) | 审批链 | 官方定义四种审批结果以及询问和从不询问两种策略；教学版同样在审批失败时默认拒绝 |
+| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方通过 `exec.signal` 通知运行中的命令停止，教学版由 Python 子进程接口在超时后直接终止 |
 
 ## 练习
 
 1. 文本规则能够决定“是否允许执行”，内核沙箱能够限制“执行后真正影响什么”。请比较二者能够防御的风险，并解释为什么审批通过也不能代替系统级隔离。
 2. 为一个日常编码智能体制定命令策略：哪些命令可以自动执行，哪些必须逐次审批，哪些应始终拒绝？请考虑读取、测试、网络访问、Git 写操作和删除文件等类别。
 3. 一次性授权降低了长期授权风险，却可能造成审批疲劳；会话级授权更方便，却可能被后续命令滥用。设计一种折中方案，并说明授权应绑定哪些信息。
-4. 为命令执行器增加“预览决策”能力，在不运行命令的情况下返回模式门、审批和票据检查结果。先预览安全、需审批和拒绝三类命令，再真实执行一个会超时的安全命令，说明预览与执行如何共享策略、执行器又负责哪些运行期结果。
+4. 为命令执行器增加“预览决策”能力，在不运行命令的情况下返回运行模式、审批和一次性授权的检查结果。先预览自动允许、需审批和拒绝三类命令，再执行一个会超时的命令，说明预览与执行如何共享策略、执行器又负责哪些运行期结果。

@@ -8,7 +8,7 @@ repository are original unless a file states otherwise.
 
 Copyright (c) 2026 DeepSeek
 
-Pinned source: <https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534>
+Pinned source: <https://github.com/deepseek-ai/deepseek-harness/tree/b2e3b2a0125854567a4a5fcba75782e42fe84901>
 
 MIT License
 

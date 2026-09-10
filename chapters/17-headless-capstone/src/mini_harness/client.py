@@ -27,10 +27,7 @@ from httpx_sse import aconnect_sse
 
 
 def load_api_key() -> str:
-    """按「环境变量优先，其次 .env 文件」的顺序找 DeepSeek API Key。
-
-    与章节版的一个差异：安装后的包可能位于 site-packages，不能从
-    __file__ 推断用户项目。这里从当前工作目录向上查找 .env。"""
+    """先读取环境变量，再从当前工作目录向上查找 .env。"""
     from_env = os.getenv("DEEPSEEK_API_KEY")
     if from_env:
         return from_env
@@ -51,8 +48,8 @@ def load_api_key() -> str:
 class ToolCall:
     """模型发起的一次工具调用请求。
 
-    arguments 是 JSON 字符串而不是 Python 对象——这是 OpenAI 兼容协议的
-    规定：模型生成的参数是文本，必须先 json.loads 解析才能执行。
+    OpenAI 兼容协议把 arguments 表示为 JSON 字符串。执行工具前需要先用
+    json.loads 将其解析成 Python 对象。
     """
 
     id: str  # 调用编号，工具结果回灌时靠它一一对应
@@ -66,7 +63,7 @@ class Message:
 
     - reasoning_content：模型的思考内容，后续请求必须按原文回传；
     - tool_calls：assistant 消息可以携带一组工具调用请求；
-    - tool_call_id：role="tool" 的消息用它标明「这是对哪次调用的回答」。
+    - tool_call_id：role="tool" 的消息用它标明对应的工具调用。
     """
 
     role: str
@@ -80,9 +77,8 @@ class Message:
 class Tool:
     """一个 Agent 可用的工具。
 
-    - name/description/parameters 是「给模型看的说明书」——模型读它们来决定
-      什么时候调用、传什么参数；
-    - execute 是「给程序跑的代码」——真正的计算在 Agent 进程里完成。
+    - name/description/parameters 是发送给模型的参数说明；
+    - execute 是仅在 Agent 进程中运行的执行函数。
     """
 
     name: str
@@ -92,7 +88,7 @@ class Tool:
 
 
 class ChatClient(Protocol):
-    """LLM service definition；provider 只需满足这条结构化接口。"""
+    """LLM 服务接口；具体提供者实现同一结构即可替换。"""
 
     MODEL: str
 
@@ -108,15 +104,18 @@ class ChatClient(Protocol):
 
 class DeepSeekClient:
     BASE_URL = "https://api.deepseek.com"
-    MODEL = "deepseek-chat"
+    MODEL = "deepseek-v4-flash"
 
     def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or load_api_key()
+        self._configured_api_key = api_key
+
+    def _api_key(self) -> str:
+        """每次请求解析凭据，使轮换后的环境或 .env 无需重建客户端。"""
+        return self._configured_api_key or load_api_key()
 
     @staticmethod
     def _wire_message(m: Message) -> dict[str, Any]:
-        """把内部 Message 转成协议要求的 dict。assistant 的思考原文会完整回传；
-        role="tool" 还必须带 tool_call_id，让服务器知道结果对应哪次调用。"""
+        """把内部消息转换成协议字典，并保留思考内容与工具调用编号。"""
         wire: dict[str, Any] = {"role": m.role}
         if m.content is not None:
             wire["content"] = m.content
@@ -138,8 +137,7 @@ class DeepSeekClient:
         return wire
 
     def chat(self, messages: list[Message], tools: list[Tool] | None = None) -> Message:
-        """非流式调用。本章的 Agent 循环用它：一次拿回完整回复（含 reasoning_content 与 tool_calls），
-        逻辑最清晰。流式工具分片的组装留到练习与官方对照。"""
+        """执行非流式调用，返回含思考内容和工具调用的完整消息。"""
         payload: dict[str, Any] = {
             "model": self.MODEL,
             "messages": [self._wire_message(m) for m in messages],
@@ -156,11 +154,12 @@ class DeepSeekClient:
                 }
                 for tool in tools
             ]
+        api_key = self._api_key()
         with httpx.Client(timeout=60) as client:
             response = client.post(
                 f"{self.BASE_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
@@ -191,6 +190,7 @@ class DeepSeekClient:
     async def stream(self, messages: list[Message]) -> AsyncIterator[str]:
         """流式调用：只处理纯文本回答的展示。工具调用场景见 README 对照。"""
         completed = False
+        api_key = self._api_key()
         async with (
             httpx.AsyncClient(timeout=60) as client,
             aconnect_sse(
@@ -198,7 +198,7 @@ class DeepSeekClient:
                 "POST",
                 f"{self.BASE_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
@@ -208,6 +208,7 @@ class DeepSeekClient:
                 },
             ) as event_source,
         ):
+            event_source.response.raise_for_status()
             async for event in event_source.aiter_sse():
                 if event.data == "[DONE]":
                     completed = True

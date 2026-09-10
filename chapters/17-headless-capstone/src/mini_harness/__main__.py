@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from collections.abc import Callable
@@ -21,12 +22,10 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from .agent import Agent
+from .agent import Agent, AgentRegistry
 from .bundle import BundleConfig, headless_bundle
 from .capabilities import load_settings_document
-from .client import Message
 from .cordis import Context
-from .meter import TokenMeter
 from .persistence import JsonlStore
 from .session import Session
 
@@ -48,35 +47,34 @@ def build_agent(
             checkpoint_flush=checkpoint_flush,
         ),
     )
-    return cast(Agent, ctx.require("agent"))
+    agents = cast(AgentRegistry, ctx.require("agents"))
+    agent = agents.get("main")
+    if agent is None:
+        raise RuntimeError("headless Bundle 未创建 main Agent")
+    return agent
 
 
 def run_task(task: str, session_file: str | Path | None = None) -> tuple[str, bool]:
-    """跑一个一次性任务，返回 (最后一条 assistant 文本, 是否正常完成)。"""
+    """运行一次性任务，返回最后一条 assistant 文本和完成状态。"""
     path = Path(session_file) if session_file is not None else _new_session_file()
     store = JsonlStore(path)
     agent = build_agent(checkpoint_flush=store.save)
-    meter = TokenMeter(context_window=100_000)
 
     try:
         agent.followup(task)
         session = agent.run()
-        # 第 09 章的计量：任务结束后汇报上下文压力
-        pressure = meter.pressure(meter.measure(_messages_of(session)))
-        print(f"[meter] 上下文占用 {pressure.ratio:.1%}", file=sys.stderr)
-
-        # 官方语义：最后一条 assistant 文本写 stdout；完成与否决定退出码
         final_text = ""
         for message in session.derive_messages():
             if message.role == "assistant" and message.content:
                 final_text = message.content
-        turn_ends = [event for event in session.events if event.type == "turn/end"]
+        turn_ends = [
+            event for event in session.snapshot_events() if event.type == "turn/end"
+        ]
         completed = bool(turn_ends and turn_ends[-1].data.get("reason") == "completed")
         return final_text, completed
     finally:
         try:
             store.save(agent.session)
-            print(f"[persist] 会话已保存到 {store.path}", file=sys.stderr)
         finally:
             agent.close()
 
@@ -86,21 +84,36 @@ def _new_session_file() -> Path:
     return SESSION_DIR / f"{uuid4().hex}.jsonl"
 
 
-def _messages_of(session: Session) -> list[Message]:
-    system = Message(role="system", content="(组装提示词)")
-    return [system, *session.derive_messages()]
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mini-harness",
+        description="运行一个任务并输出最终回答，或以 stdio JSON-RPC 模式启动。",
+    )
+    parser.add_argument(
+        "--rpc", action="store_true", help="从标准输入逐行处理 JSON-RPC 请求"
+    )
+    parser.add_argument("task", nargs="*", help="要交给智能体的一次性任务")
+    return parser
 
 
 def main() -> None:
-    arguments = sys.argv[1:]
-    if arguments == ["--rpc"]:
+    parser = _argument_parser()
+    arguments = parser.parse_args()
+    if arguments.rpc:
+        if arguments.task:
+            parser.error("--rpc 不能与任务文本同时使用")
         _run_rpc()
         return
-    task = " ".join(arguments).strip()
+    task = " ".join(arguments.task).strip()
     if not task:
-        print('用法: mini-harness "你的任务"', file=sys.stderr)
-        sys.exit(2)
-    final_text, completed = run_task(task)
+        parser.print_usage(sys.stderr)
+        print('mini-harness: error: 缺少任务，例如 mini-harness "运行测试"', file=sys.stderr)
+        sys.exit(1)
+    try:
+        final_text, completed = run_task(task)
+    except Exception as error:  # noqa: BLE001 - CLI 将运行失败映射为退出码 1
+        print(f"mini-harness: {error}", file=sys.stderr)
+        sys.exit(1)
     if final_text:
         print(final_text)
     sys.exit(0 if completed else 1)

@@ -6,7 +6,7 @@
 
 DeepSeek Harness 采用“一切皆插件”的设计：模型、工具、运行循环、压缩和权限控制分别由不同插件提供，再安装到同一个运行环境中。每项能力因此可以单独实现、替换和卸载，也能负责清理自己创建的资源。
 
-本章会用大约 150 行 Python 实现一个迷你插件系统，名为 mini-cordis。它先解决三件事：安装插件、记录插件从启动到卸载的状态，以及自动清理插件创建的资源。插件之间怎样共享能力，留到第 04 章继续完成。官方使用的 TypeScript 库名为 cordis，章末会说明两者的对应关系。
+本章会用不到 200 行 Python 实现一个迷你插件系统，名为 mini-cordis。它先解决三件事：安装插件、记录插件从启动到卸载的状态，以及自动清理插件创建的资源。插件之间怎样共享能力，留到第 04 章继续完成。官方使用的 TypeScript 库名为 cordis，章末会说明两者的对应关系。
 
 ## 学习目标
 
@@ -31,7 +31,7 @@ def run_everything():
     history = [...]                   # 会话的细节
     for turn in range(10):            # 循环的细节
         ...
-        # 压缩、权限、日志……全都要挤进这个函数
+        # 压缩、权限和日志逻辑都会集中在这个函数中
 ```
 
 每一项能力都在这个函数里占一段。能力较少时还能看清，继续增加后就很难单独修改和测试。插件系统把每项能力放进自己的函数：
@@ -156,8 +156,10 @@ class PluginHandle:
     def dispose(self) -> None:
         if self.state == "disposed":
             return
-        self._dispose_all()
-        self.state = "disposed"
+        try:
+            self._dispose_all()
+        finally:
+            self.state = "disposed"
 
     def _dispose_all(self) -> None:
         disposers = list(reversed(self._disposers))
@@ -172,7 +174,7 @@ class PluginHandle:
             raise ExceptionGroup("插件资源清理失败", errors)
 ```
 
-注意 `reversed`：后注册的资源先清理。资源之间往往存在依赖，例如先打开文件，再启动读取这个文件的任务；清理时就应先停止任务，再关闭文件。某个清理函数抛错时，其余资源仍会继续清理，最后再统一报告错误。清单在执行前已经清空，清理函数也经过一次性包装，因此重复卸载或手动解绑不会重复释放资源。
+`reversed` 让后注册的资源先清理。资源之间往往存在依赖，例如先打开文件，再启动读取这个文件的任务；清理时就应先停止任务，再关闭文件。某个清理函数抛错时，其余资源仍会继续清理，最后再统一报告错误。清单在执行前已经清空，清理函数也经过一次性包装，因此重复卸载或手动解绑不会重复释放资源。
 
 ## 3.4 创建资源时同时登记清理方式
 
@@ -198,7 +200,7 @@ ctx.effect(lambda: stop_task)
 
 这里有两个点要解释清楚：
 
-为什么多套一层 `lambda`？`effect` 会立即调用收到的启动函数。如果直接写 `ctx.effect(stop_task)`，它会把 `stop_task` 误当作启动函数并立即执行，得到的 `None` 也不是清理函数。包一层 `lambda: stop_task` 后，`effect` 调用 lambda 得到的是 `stop_task` 函数本身，并不会执行它，于是可以把它登记进清理清单。简单说，传给 `effect` 的函数负责启动，启动函数的返回值负责停止。
+`effect` 会立即调用收到的启动函数。如果直接写 `ctx.effect(stop_task)`，`stop_task` 会立即执行并返回 `None`，因此无法登记清理函数。写成 `lambda: stop_task` 后，启动函数返回 `stop_task` 本身，`effect` 再把它登记进清理清单。传给 `effect` 的函数负责启动，其返回值负责停止。
 
 如果只在插件函数末尾手写清理逻辑，提前返回、安装失败和被其他插件卸载等路径都容易遗漏。`effect` 把清理交给句柄统一执行，插件作者只需要在创建资源时同时提供停止方法。官方 cordis 也采用这种设计，由统一入口记录需要在卸载时撤销的操作。
 
@@ -227,7 +229,7 @@ ctx.effect(lambda: stop_task)
 
 `on` 会把解绑函数 `remove` 收集到当前插件名下。这样，插件卸载时，它注册的所有监听器都会自动解绑。没有这一步，监听器会在插件卸载后继续留在事件表中，后续广播仍然会调用它。
 
-`emit` 会依次同步调用全部监听器，不使用它们的返回值。这是事件总线最简单的形式。第 04 章会加入一种可以在执行前后处理数据的事件链，官方称为 waterfall。
+`emit` 会依次同步调用全部监听器，不使用它们的返回值。本章只实现同步广播；第 04 章会加入一种可以在执行前后处理数据的事件链，官方称为 waterfall。
 
 ## 3.6 级联：子插件随父插件销毁
 
@@ -321,10 +323,10 @@ uv run python chapters/03-python-cordis/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/context.ts) | `Context` | 官方通过 JavaScript `Proxy` 检查服务属性读取；第 04 章用 Python `__getattr__` 表达同一约束 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把一次插件任务称为 fiber，并实现了更完整的安装、依赖与卸载状态机 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/context.ts) | `Context` | 官方通过 JavaScript `Proxy` 检查服务属性读取；第 04 章用 Python `__getattr__` 表达同一约束 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把一次插件任务称为 fiber，并实现了更完整的安装、依赖与卸载状态机 |
 | 同上 | `effect` | 官方的 `effect` 同样会立即执行启动函数并登记清理函数，还支持异步清理和更完整的错误隔离 |
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方拒绝读取未声明的服务，第 04 章对齐这一依赖显式化规则 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方拒绝读取未声明的服务，第 04 章对齐这一依赖显式化规则 |
 
 教学版没有实现热重载、配置结构校验和异步资源清理等工程能力。下一章继续讲解依赖注入与服务作用域。
 

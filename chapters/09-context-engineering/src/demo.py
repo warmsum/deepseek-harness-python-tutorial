@@ -78,7 +78,10 @@ def main() -> None:
     surface = session.derive_messages()[0].content or ""
     print(f"  replacement: {pruned.replacements} 条")
     print(f"  表层字符数: {len(original)} → {len(surface)}")
-    print(f"  原事件仍完整: {session.events[0].data['content'] == original}")
+    print(
+        "  原事件仍完整: "
+        f"{session.snapshot_events()[0].data['content'] == original}"
+    )
 
     print()
     print("=== ② spill：完整结果落盘，模型只收预算内预览 ===")
@@ -102,12 +105,12 @@ def main() -> None:
     messages = build_long_conversation()
 
     print()
-    print("=== ③ 长会话逐轮计量：压力爬升 ===")
+    print("=== ③ 长会话逐轮计量：压力变化 ===")
     threshold_tokens = int(CONTEXT_WINDOW * 0.8)
     for index, message in enumerate(messages[1:], start=1):
         ratio = meter.measure(messages[: index + 1]).total_tokens / CONTEXT_WINDOW
         if index % 3 == 0 or ratio > 0.8:
-            flag = "  ← 越过 80% 阈值！" if ratio > 0.8 else ""
+            flag = "  ← 达到 80% 阈值" if ratio >= 0.8 else ""
             print(f"  [{index:>2} 条] {ratio:>6.1%}{flag}")
     print(f"  阈值 = {threshold_tokens} token（{CONTEXT_WINDOW} × 0.8）")
 

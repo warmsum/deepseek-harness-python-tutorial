@@ -1,8 +1,7 @@
 """工具注册表（第 06 章首次实现）。
 
-第 02 章的工具只是一张 list[Tool]。真实 Agent 里工具需要管理：
-注册（查重）、注销、以及「给模型看的说明书清单」——模型只需要
-name/description/parameters，execute 是给程序跑的，绝不能外泄。
+第 02 章用 list[Tool] 保存工具。本章增加注册、重名检查、注销和模型侧
+schema 投影；执行函数只留在本地，不进入模型请求。
 """
 
 from __future__ import annotations
@@ -20,8 +19,7 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> Callable[[], None]:
-        """注册一个工具。重名即抛错——两个同名工具会让模型传参时
-        产生歧义，必须在入口处挡掉。"""
+        """注册一个工具；重名工具会造成调用歧义，因此直接报错。"""
         if tool.name in self._tools:
             raise ValueError(f'工具 "{tool.name}" 已被注册')
         self._tools[tool.name] = tool
@@ -42,9 +40,7 @@ class ToolRegistry:
         return [self._tools[name] for name in sorted(self._tools)]
 
     def schemas(self) -> list[dict[str, Any]]:
-        """投影出「给模型看的说明书清单」：只有 name/description/
-        parameters 三个字段，不含 execute。这是注册表与普通列表的关键
-        区别——模型侧接口与程序侧接口被明确分开。"""
+        """返回模型侧 schema，不包含本地 execute 函数。"""
         return [
             {
                 "name": tool.name,

@@ -13,7 +13,7 @@ from sandbox import WORKSPACE_WRITE, SandboxPolicy
 
 def _path(workspace: Path, arguments: dict[str, Any]) -> Path:
     raw = arguments.get("path")
-    if not isinstance(raw, str) or not raw:
+    if not isinstance(raw, str) or not raw.strip():
         raise ValueError("path 必须是非空字符串")
     candidate = Path(raw)
     return candidate if candidate.is_absolute() else workspace / candidate
@@ -67,7 +67,7 @@ def build_tools(
                 str(args["new_string"]),
                 policy,
                 tracker,
-                bool(args.get("replace_all", False)),
+                _optional_bool(args, "replace_all", False),
             ),
         ),
         Tool(
@@ -91,6 +91,13 @@ def build_tools(
             lambda args: glob(workspace, str(args["pattern"])),
         ),
     ]
+
+
+def _optional_bool(arguments: dict[str, Any], name: str, default: bool) -> bool:
+    value = arguments.get(name, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} 必须是布尔值")
+    return value
 
 
 def main() -> None:

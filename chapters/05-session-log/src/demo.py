@@ -19,7 +19,7 @@ from session import Session, SessionEvent
 
 
 def print_event(event: SessionEvent) -> None:
-    print(f"  #{event.id:<2} {event.type:<20} {event.data}")
+    print(f"  #{event.seq:<2} {event.type:<20} {event.data}")
 
 
 def print_message(m: Message) -> None:
@@ -38,7 +38,7 @@ def main() -> None:
     # ① 订阅者视角：模拟「持久化插件」挂在订阅接口上，实时看到每条事件
     print("=== ① 订阅者视角 ===")
     demo = Session()
-    demo.subscribe(lambda e: print(f"  [订阅者] 看到新事件 #{e.id} {e.type}"))
+    demo.subscribe(lambda e: print(f"  [订阅者] 看到新事件 #{e.seq} {e.type}"))
     demo.append("user/message", {"content": "你好"})
     print()
 
@@ -51,7 +51,7 @@ def main() -> None:
         user_prompt="1+2*3 等于几？",
         max_steps=10,
     )
-    for event in result.events:
+    for event in result.snapshot_events():
         print_event(event)
 
     print()
@@ -61,7 +61,7 @@ def main() -> None:
 
     print()
     print("=== ④ 重放：同一份日志 → 新会话 → 完全相同的消息历史 ===")
-    replayed = Session.from_log(result.events)
+    replayed = Session.from_log(result.snapshot_events())
     original = result.derive_messages()
     replayed_messages = replayed.derive_messages()
     same = [m.role for m in original] == [m.role for m in replayed_messages]

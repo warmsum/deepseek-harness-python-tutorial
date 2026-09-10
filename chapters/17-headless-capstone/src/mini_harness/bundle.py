@@ -1,4 +1,4 @@
-"""Python 版 headless Bundle：声明插件清单，不承载业务逻辑。"""
+"""Python 命令行 Bundle：声明插件清单，不承载业务逻辑。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from .agent import Agent
+from .agent import Agent, AgentRegistry
 from .calculator import calculator
 from .capabilities import (
     delegation_consumer,
@@ -70,7 +70,13 @@ def prompt_provider(ctx: Context, _config: Any) -> None:
         )
     )
     ctx.effect(
-        lambda: prompt.section("rules", "回答要简洁：先给结论，再给过程。", order=100)
+        lambda: prompt.section(
+            "rules",
+            "回答要直接、客观，并先给结论。说明实际结果和使用方法；只有限制会影响"
+            "结果判断时才说明，并具体指出未完成或未验证的内容。不要堆叠免责声明、"
+            "重复边界，也不要通过贬低其他方案来证明当前选择。",
+            order=100,
+        )
     )
 
 
@@ -98,19 +104,26 @@ def agent_provider(ctx: Context, _config: Any) -> None:
     assert isinstance(tools, ToolRegistry)
     assert isinstance(prompt, PromptAssembler)
     assert isinstance(session, Session)
+    agents = AgentRegistry()
     agent = Agent(
         ctx,
         client,
         tools,
         prompt,
-        variables={"name": "小算"},
+        variables={"name": "mini-harness"},
         session=session,
+        agent_id="main",
     )
-    ctx.provide("agent", agent)
+    ctx.provide("agents", agents)
+    ctx.effect(lambda: agents.register(agent))
+    # 使用者是 Agent provider 的子插件，会随这个精确实例一起卸载和重建。
+    ctx.plugin(interaction_consumer, agent)
+    ctx.plugin(delegation_consumer, agent)
+    ctx.plugin(rpc_provider, agent)
 
 
 def headless_bundle(ctx: Context, config: BundleConfig) -> None:
-    """挂载插件树；顺序只表达 provider/wrapper 优先级。"""
+    """挂载插件树；列表顺序用于确定提供者和包装器的优先级。"""
     ctx.plugin(settings_provider, config.settings_document)
     ctx.plugin(session_provider, config.session)
     ctx.plugin(prompt_provider)
@@ -143,8 +156,4 @@ def headless_bundle(ctx: Context, config: BundleConfig) -> None:
     ctx.plugin(workflow_provider)
     ctx.plugin(delegation_provider)
 
-    # 这些 consumer 先等待 agent provider，展示服务后到自动启动。
-    ctx.plugin(interaction_consumer)
-    ctx.plugin(delegation_consumer)
-    ctx.plugin(rpc_provider)
     ctx.plugin(agent_provider)

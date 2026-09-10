@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from client import DeepSeekClient, Message
+from client import DeepSeekClient
 from prompt import PromptAssembler
 from registry import ToolRegistry
 from session import Session
@@ -23,14 +23,12 @@ def run_agent(
     max_steps: int = 10,
     variables: dict[str, str] | None = None,
 ) -> Session:
-    """跑一轮带工具调用的对话。请求 envelope = 组装出的 system + 注册表 schema。"""
-    tools = registry.all()
-    tools_by_name = {tool.name: tool for tool in tools}
+    """使用组装后的系统提示词与工具 schema 运行一轮工具对话。"""
     session = Session()
 
     session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": user_prompt})
     request_header: str | None = None
+    request_generation = 0
 
     try:
         for step in range(1, max_steps + 1):
@@ -39,29 +37,43 @@ def run_agent(
             try:
                 # Prompt provider 可能返回运行时值，因此每个 step 都重新组装。
                 system_prompt = assembler.render(variables)
-                header = {
-                    "config": {"provider": "deepseek", "model": client.MODEL},
-                    "system": system_prompt,
-                    "tools": registry.schemas(),
+                session.record_system_prompt(system_prompt, turn=1, step=step)
+                if step == 1:
+                    session.append("user/message", {"content": user_prompt})
+                tools = registry.all()
+                tools_by_name = {tool.name: tool for tool in tools}
+                header: dict[str, object] = {
+                    "config": {
+                        "provider": "deepseek-official",
+                        "model": client.MODEL,
+                    }
                 }
+                schemas = registry.schemas()
+                if schemas:
+                    header["tools"] = schemas
                 header_fingerprint = json.dumps(
                     header, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 )
-                if header_fingerprint != request_header:
+                surface_changed = session.replace_generation != request_generation
+                if header_fingerprint != request_header or surface_changed:
+                    reason = (
+                        "initial"
+                        if request_header is None
+                        else "change"
+                        if header_fingerprint != request_header
+                        else "series"
+                    )
                     session.append(
                         "request/header",
                         {
                             "header": header,
-                            "reason": "initial" if request_header is None else "change",
+                            "reason": reason,
                         },
                     )
                     request_header = header_fingerprint
+                    request_generation = session.replace_generation
 
-                messages = [
-                    Message(role="system", content=system_prompt),
-                    *session.derive_messages(),
-                ]
-                reply = client.chat(messages, tools)
+                reply = client.chat(session.derive_messages(), tools)
                 session.append(
                     "assistant/message",
                     {

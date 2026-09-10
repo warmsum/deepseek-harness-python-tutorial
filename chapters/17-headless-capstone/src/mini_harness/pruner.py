@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .client import Message
 from .meter import estimate_message
-from .session import Session, SessionEvent
+from .session import Session
 
 PRUNE_MARKER = "\n\n[... tool result middle pruned ...]\n\n"
 
@@ -61,9 +61,7 @@ class ToolResultPruner:
     def prune_session(self, session: Session) -> PruneResult:
         """扫描一个稳定表层快照，追加 replacement，完整原事件不删除。"""
         candidates = [
-            event
-            for event in _surface_events(session.events)
-            if event.type == "tool/result"
+            event for event in session.surface_events() if event.type == "tool/result"
         ]
         replacements = 0
         removed = 0
@@ -76,17 +74,11 @@ class ToolResultPruner:
                 continue
             data = dict(event.data)
             data["content"] = pruned
-            data["surface_op"] = {
-                "op": "replace",
-                "start": event.id,
-                "end": event.id,
-            }
-            data["source_event_seqs"] = [event.id]
             session.append(
                 "compaction/prune",
                 {
-                    "shadowed_range": {"start": event.id, "end": event.id},
-                    "shadowed_seqs": [event.id],
+                    "shadowed_range": {"start": event.seq, "end": event.seq},
+                    "shadowed_seqs": [event.seq],
                     "shadowed_token_count": estimate_message(
                         Message(
                             role="tool",
@@ -96,31 +88,16 @@ class ToolResultPruner:
                     ),
                 },
             )
-            session.append("tool/result", data)
+            session.append(
+                "tool/result",
+                data,
+                surface_op={
+                    "op": "replace",
+                    "start_seq": event.seq,
+                    "end_seq": event.seq,
+                },
+                source_event_seqs=(event.seq,),
+            )
             replacements += 1
             removed += len(content) - len(pruned)
         return PruneResult(replacements, removed)
-
-
-def _surface_events(events: tuple[SessionEvent, ...]) -> list[SessionEvent]:
-    nodes: list[SessionEvent] = []
-    for event in events:
-        if event.type not in {"user/message", "assistant/message", "tool/result"}:
-            continue
-        operation = event.data.get("surface_op")
-        if not isinstance(operation, dict) or operation.get("op") != "replace":
-            nodes.append(event)
-            continue
-        start = operation.get("start")
-        end = operation.get("end")
-        if not isinstance(start, int) or not isinstance(end, int) or start > end:
-            raise ValueError("surface replacement 范围无效")
-        indexes = [
-            index
-            for index, node in enumerate(nodes)
-            if node.id in range(start, end + 1)
-        ]
-        if not indexes:
-            raise ValueError("surface replacement 引用了不存在的节点")
-        nodes[indexes[0] : indexes[-1] + 1] = [event]
-    return nodes

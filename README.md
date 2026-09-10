@@ -21,7 +21,7 @@
 
 调用一次大语言模型并不复杂：发送消息，等待回复，再把文本显示出来。要让智能体持续完成任务，还需要处理另一组问题。模型如何调用工具？多轮对话如何保存？上下文越来越长时怎样压缩？文件和命令怎样限制权限？任务执行到一半时，新的用户消息又该如何进入当前流程？
 
-[DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness)（简称 DSH）围绕这些问题建立了一套完整的智能体运行系统。它使用 TypeScript 开发，源码由许多相互协作的模块组成。如果你主要使用 Python，直接阅读官方源码时，还要同时熟悉 TypeScript 和较复杂的项目结构，容易分散对智能体运行机制的注意力。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（简称 DSH）围绕这些问题建立了一套完整的智能体运行系统。它使用 TypeScript 开发，源码由许多相互协作的模块组成。如果你主要使用 Python，直接阅读官方源码时，还要同时熟悉 TypeScript 和较复杂的项目结构，容易分散对智能体运行机制的注意力。
 
 mini-harness 将 DSH 的核心机制拆成 17 个 Python 章节。课程从最小的流式模型调用开始，依次加入工具、会话、提示词、持久化、上下文压缩、文件与命令能力、技能、子智能体和网络搜索，最后组装出一个能够接收任务、保存会话并返回结果的命令行智能体。
 
@@ -182,7 +182,9 @@ flowchart TB
 
 ## 官方源码依据
 
-课程中的机制和术语均与 DeepSeek Harness 官方源码核对。课程使用 2026-08-19 的 [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534)（`0.1.0-rc.8`）作为固定参考版本，避免官方源码继续变化后无法复现文中的结论。每章末尾都会列出相关源码位置，并说明课程保留了什么、简化了什么。
+课程中的机制和术语均与 DeepSeek Harness 官方源码核对。当前固定参考版本是 2026-09-09 发布的预发布版 [`dsh-v0.1.5-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/tree/b2e3b2a0125854567a4a5fcba75782e42fe84901)，commit 为 `b2e3b2a0125854567a4a5fcba75782e42fe84901`。固定版本使源码链接和行为说明可以复查；每章末尾都会列出对应位置，并说明课程保留的语义与教学简化。
+
+这一基线采用 Session V3：系统提示词是消息表层的一部分，请求头只保存模型配置与工具 schema；Inbox 通过会话事件恢复待处理消息；插件通过 `ctx.agents` 管理实时 Agent，并在 setup 时显式接收 Agent。课程用较小的 Python 数据结构表达这些语义，不读取官方会话文件。
 
 <details>
 <summary><strong>查看 17 章官方源码对照表</strong></summary>
@@ -195,8 +197,8 @@ flowchart TB
 | 04 | 服务、插件上下文与顺序处理链 | `vendor/cordis/src/reflect.ts`、`vendor/cordis/src/events.ts` |
 | 05 | 事件日志与完整模型请求 | `packages/core/session`、`packages/core/agent-loop/src/agent.ts` |
 | 06 | 提示词与工具注册表 | `packages/core/system-prompt`、`packages/core/tools` |
-| 07 | 轮次、步骤与消息队列 | `packages/core/agent/src/inbox.ts`、`packages/core/agent-loop/src/agent.ts` |
-| 08 | 仅追加 JSONL 与恢复 | `packages/session/session-persistence-jsonl` |
+| 07 | 轮次、步骤与消息队列 | `packages/core/agent-loop/src/inbox.ts`、`packages/core/agent-loop/src/agent.ts` |
+| 08 | 仅追加 JSONL、格式代际与恢复 | `packages/session/session-persistence-jsonl`、`packages/session/session-format-v2-to-v3` |
 | 09 | 回放感知计量与压缩 | `packages/llm/token-meter`、`packages/compaction/compaction-basic` |
 | 10 | 文件围栏与观察策略 | `packages/fs/fs-sandbox`、`packages/fs/fs-observation-policy` |
 | 11 | 命令沙箱与审批 | `packages/shell/bash-sandbox`、`packages/interaction/user-approval` |
@@ -228,7 +230,7 @@ mini-harness/
 
 文件和命令章节会把真实模型调用限制在临时工作区：第 10 章使用 `workspace-write`，要求模型先读、再改、最后复查；第 11 章只批准示例指定的两条精确命令。文件路径会先规范化再检查允许范围，命令执行带有审批、超时和结果回收。这些机制用于减少学习和本地实验中的误操作。
 
-路径围栏仍运行在普通 Python 进程中，不能替代操作系统级沙箱。子进程拥有当前用户已经具备的系统权限。课程也没有实现图形界面、HTTP 服务、热重载和云端隔离环境，这些能力不影响命令行运行主线的学习。
+路径围栏仍运行在普通 Python 进程中，不能替代操作系统级沙箱。子进程拥有当前用户已经具备的系统权限。`web_fetch` 不读取环境代理，会拒绝非公网地址并限制同源重定向、内容类型和响应大小，但教学版没有把实际连接固定到预先校验的地址，也不检测 DNS64。课程也没有实现图形界面、HTTP 服务、热重载和云端隔离环境。
 
 ## 后续学习方向
 
@@ -237,7 +239,7 @@ mini-harness/
 - 在第 17 章接入第 09 章的自动摘要压缩，并处理模型输入超过上限后的恢复；
 - 将第 14 章教学版 Python Workflow 替换为官方 Worker Thread JavaScript 引擎；
 - 接入 MCP 客户端，将外部服务动态注册为工具；
-- 实现 Code Mode，把多个工具接口折叠成一个代码执行入口；
+- 实现程序化工具调用（PTC）模式，把多个工具接口折叠成一个代码执行入口；
 - 在第 02 章补充流式工具参数分片的增量组装；
 - 对照 DSH 的网页界面、宿主服务和平台沙箱，研究命令行运行方式之外的系统组成。
 

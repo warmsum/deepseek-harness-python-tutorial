@@ -31,7 +31,7 @@
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "messages": [
     { "role": "system", "content": "你是一个简洁的助手。" },
     { "role": "user", "content": "什么是流式输出？" }
@@ -40,8 +40,8 @@
 }
 ```
 
-- `model` 指定用哪个模型，`deepseek-chat` 是 DeepSeek 的通用对话模型。
-- `messages` 是对话历史，一个消息数组。模型对世界的全部了解都来自这个数组，模型没有记忆，给它什么它看什么。
+- `model` 指定用哪个模型；这里使用当前官方 DSH 默认的 `deepseek-v4-flash`。
+- `messages` 是对话历史。模型不会自动保留上一次 API 调用的对话状态，本次请求需要显式携带后续推理所需的历史。
 - `stream` 为 false 表示生成完整回答后再返回，为 true 表示边生成边返回。
 
 ### 三种角色
@@ -54,7 +54,7 @@
 | `user` | 用户 | 人提出的问题和要求 |
 | `assistant` | 模型 | 模型自己的回答 |
 
-`system` 存在的意义是给模型设定行为。模型的默认行为是热心回答一切，当需要它扮演特定角色时，把要求写进 `system` 最有效。官方 Harness 的系统提示词就承担这个职责，第 06 章会专门讲它。
+`system` 用于设定模型在当前请求中的角色和行为规则。官方 Harness 的系统提示词承担这一职责，第 06 章会专门讲解它的组装过程。
 
 ### 一次响应长什么样
 
@@ -74,7 +74,7 @@
 
 ## 环境准备
 
-需要三样东西，五分钟能搞定。
+运行示例需要三项准备：
 
 1. **Python 3.11 及以上**，终端运行 `python --version` 确认。
 2. **uv**，一个用 Rust 写的 Python 包管理器，终端运行 `uv --version` 确认，没有就去 [astral.sh/uv](https://astral.sh/uv) 按说明安装。项目依赖写在根目录 `pyproject.toml` 里，`uv run python 某文件.py` 会自动安装缺失的包。
@@ -119,14 +119,14 @@ uv run python chapters/01-streaming-agent/src/demo.py
 ```
 chapters/01-streaming-agent/src/
 ├── client.py   # 本章主角：从零实现的客户端
-└── demo.py     # 把 client.py 跑起来看效果
+└── demo.py     # 运行 client.py 中的三种调用方式
 ```
 
 接下来按组成部分实现这个客户端。
 
 ## 1.1 把 API Key 读进来
 
-调用模型前先拿到 Key。Key 不能硬编码在代码里，否则一开源就泄露，标准做法是放进环境变量，代码只在运行时读取。本地学习时最方便的形式是 `.env` 文件。`load_api_key()` 按环境变量优先、`.env` 兜底的顺序读取：
+调用模型前需要读取 API Key。Key 不应硬编码在代码中，而应由程序在运行时从环境变量或本地 `.env` 文件读取。`load_api_key()` 先检查环境变量，再读取 `.env`：
 
 ```python
 import os
@@ -179,11 +179,11 @@ m = Message(role="user", content="你好")
 m.content = "篡改"   # 抛 FrozenInstanceError
 ```
 
-写入历史的消息不应再被修改。对话历史会被反复读取，每一轮都要完整地发给模型，压缩、持久化和界面展示也会使用它。如果某处代码悄悄改动了旧消息，后续行为都会受到影响，而且很难排查。`frozen=True` 把这条约定变成 Python 会主动检查的限制。第 05 章的事件日志还会再次用到这个思想。
+写入历史的消息不应再被修改。对话历史会被反复读取，每一轮都要完整地发给模型，压缩、持久化和界面展示也会使用它。如果旧消息被意外修改，后续行为都会受到影响，而且很难排查。`frozen=True` 把这条约定变成 Python 会主动检查的限制。第 05 章的事件日志还会再次用到这个思想。
 
 ## 1.3 第一次调用：一次拿回完整回答
 
-最朴素的调用方式：把历史发过去，等模型全部想完，一次性拿回完整回答。先把客户端类的骨架和 `chat()` 写出来：
+基础调用方式是把历史发给模型，等待生成结束后一次取得完整回答。先实现客户端类和 `chat()`：
 
 ```python
 import httpx
@@ -191,7 +191,7 @@ import httpx
 
 class DeepSeekClient:
     BASE_URL = "https://api.deepseek.com"
-    MODEL = "deepseek-chat"
+    MODEL = "deepseek-v4-flash"
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or load_api_key()
@@ -221,8 +221,8 @@ class DeepSeekClient:
 - `Authorization` 头是 `Bearer <key>`，OpenAI 兼容接口的统一认证格式，DeepSeek 服务器读到它就知道你是谁、有没有额度。
 - `Content-Type` 头告诉服务器请求体是 JSON 格式。
 - `json={...}` 是 httpx 的便捷参数，自动把字典序列化成 JSON 并设置好格式头。请求体的三个字段正是前面讲的 `model`、`messages`、`stream`。
-- `stream` 为 `False`，表示全部想完再一次性返回。
-- `raise_for_status()` 在 HTTP 状态码非 2xx 时抛出带状态码的异常。401 表示 Key 错误，429 表示请求过频，502 表示服务端问题。不检查状态码是新手最常见的坑，请求失败时直接往下解析，会得到一个莫名其妙的 KeyError。
+- `stream` 为 `False`，表示生成完成后再一次性返回。
+- `raise_for_status()` 在 HTTP 状态码非 2xx 时抛出带状态码的异常。401 表示 Key 错误，429 表示请求过频，502 表示服务端问题。如果跳过这项检查，请求失败后继续解析成功响应字段，通常只会得到不能说明原始原因的 `KeyError`。
 - 返回路径 `data["choices"][0]["message"]["content"]` 对应前面的响应结构，逐层取到回答文本。
 
 调用它只有一行：
@@ -242,7 +242,7 @@ answer = client.chat(HISTORY)   # HISTORY 是一个 list[Message]
 
 ## 1.4 流式调用：边生成边显示
 
-模型生成文字是逐字算出来的，一段几百字的回答可能要花 20 秒以上。非流式模式下，这 20 秒里用户什么都看不到。网页版聊天没有这个问题，答案一个字一个字往外蹦，因为网页版用的是流式接口。
+模型按增量生成内容，一段较长回答可能需要等待数秒。非流式模式要等完整响应返回后才能显示；流式接口则在生成过程中持续交付内容。
 
 使用流式接口时，请求中的 `stream` 设为 `true`。服务器不再一次返回完整回答，而是在生成过程中持续发送小片段，直到回答结束。这些小片段在接口中常称为 chunk，后文统一称为“分片”。一段 500 字的回答可能被拆成几十个分片，每个分片只包含少量新内容。
 
@@ -260,7 +260,7 @@ data: [DONE]
 
 1. 每条推送以 `data: ` 开头，后面跟一段文本，空行分隔。
 2. 内容是增量而不是全量，每块只带新生成的一小段文字，所以取值路径是 `choices[0].delta.content`，与 1.3 节的 `message.content` 只差一个字段名。
-3. 结束信号是固定的一行 `data: [DONE]`，收到它表示模型说完了。
+3. 结束信号是固定的一行 `data: [DONE]`，收到它表示响应生成完成。
 
 `httpx-sse` 库负责连接管理、按空行切分事件并移除 `data: ` 前缀，调用方直接读取 `event.data` 中的内容。
 
@@ -299,6 +299,7 @@ class DeepSeekClient:
                     "stream": True,
                 },
             ) as event_source:
+                event_source.response.raise_for_status()
                 async for event in event_source.aiter_sse():
                     if event.data == "[DONE]":
                         completed = True
@@ -315,9 +316,10 @@ class DeepSeekClient:
 逐段理解：
 
 - `async with httpx.AsyncClient(...)` 是异步版 HTTP 客户端。`async with` 与普通 `with` 作用相同，用完自动关闭，区别是进出块时可以 `await` 等待。
-- `aconnect_sse(...)` 是 httpx-sse 提供的异步 SSE 连接入口。第一个参数是 http 客户端，然后是请求方法和地址，后面与 `chat()` 一样传 `headers` 和 `json`，注意 `stream` 为 `True`。
+- `aconnect_sse(...)` 是 httpx-sse 提供的异步 SSE 连接入口。第一个参数是 http 客户端，然后是请求方法和地址，后面与 `chat()` 一样传 `headers` 和 `json`，其中 `stream` 为 `True`。
 - `async for event in event_source.aiter_sse()` 每收到一条 SSE 事件迭代一次，`event.data` 就是去掉 `data: ` 前缀后的文本。
-- `[DONE]` 是 DeepSeek 的正常结束标记。实现会单独记录它是否出现；SSE 连接断开但没有 `[DONE]` 时必须报错，不能把已经收到的不完整回答当作完整消息。
+- 进入事件循环前先调用 `raise_for_status()`，HTTP 错误会保留原始状态码。
+- `[DONE]` 是 DeepSeek 的正常结束标记。实现会单独记录它是否出现；SSE 连接断开但没有 `[DONE]` 时会报错，不会把已收到的不完整回答当作完整消息。
 - `payload["choices"][0].get("delta", {})` 用 `get` 而不是下标，个别事件里可能没有 `delta` 字段，比如只带用量统计的事件，用 `get` 安全地给空字典。
 - `if piece: yield piece` 只产出非空文本。有些 delta 的 `content` 是 `None`，比如流刚开始时的元信息，跳过它们。
 
@@ -337,7 +339,7 @@ async for piece in client.stream(HISTORY):
 - 每收到一个 chunk 就往历史里塞一条消息。下一轮请求将带着几十条碎消息发给模型，token 浪费还在其次，模型看到的历史会异常混乱。
 - 流在中途断掉。如果历史里已经塞了半句话，程序必须知道它是正常完成、提供方失败，还是用户主动取消；否则后续请求会把来源不明的半个回答当成完整历史。
 
-解决办法是把“实时展示”和“写入历史”分开。每个流式分片到达时立即显示，同时暂存在组装器中；只有收到正常结束标记后，组装器才生成一条完整消息。教学版还没有用户取消入口，因此采用较保守的规则：只要缺少 `[DONE]`，就不生成可写入历史的消息。官方实现还会区分请求失败和用户主动取消，并在取消时按规则保留已经展示的有效内容，具体差异放在章末说明。
+解决办法是把“实时展示”和“写入历史”分开。每个流式分片到达时立即显示，同时暂存在组装器中；只有收到正常结束标记后，组装器才生成一条完整消息。教学版还没有用户取消入口，因此缺少 `[DONE]` 时不生成可写入历史的消息。官方实现还会区分请求失败和用户主动取消，并在取消时按规则保留已经展示的有效内容，具体差异放在章末说明。
 
 ```python
 class DeepSeekClient:
@@ -352,7 +354,7 @@ class DeepSeekClient:
 
 - `pieces` 列表暂存所有分片，`"".join(pieces)` 把它们按顺序拼成完整文本。
 - 返回的是 `Message` 实例，`frozen=True` 保证这条消息从此不可篡改。
-- 流中途抛异常，或连接结束前没有收到 `[DONE]` 时，函数都以异常结束，半成品消息根本不会产生。这就是历史只存完整消息的落地方式。
+- 流中途抛异常，或连接结束前没有收到 `[DONE]` 时，函数都以异常结束，不会生成可写入历史的消息。
 
 这段实现虽然很短，却建立了后续章节都会遵守的约束。从第 02 章起，历史中还会出现工具调用和工具结果，但“分片用于展示，完整消息才写入历史”的规则不会改变。
 
@@ -379,8 +381,8 @@ class DeepSeekClient:
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | DeepSeek 适配器解析 SSE，并把模型服务报告的正常结束、错误与中止转换成明确的结束原因 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `stream_message()` | `BlockAssembler` 正常结束时组装完整块；显式取消时只保留非空文本/思考前缀，工具调用不进入中断消息 |
+| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | DeepSeek 适配器解析 SSE，并把模型服务报告的正常结束、错误与中止转换成明确的结束原因 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/llm/src/assembler.ts) | `stream_message()` | `BlockAssembler` 正常结束时组装完整块；显式取消时只保留非空文本/思考前缀，工具调用不进入中断消息 |
 
 教学版只处理文本。官方组装器还处理思考与工具调用分片，DeepSeek 适配器也能为支持图片的模型解析持久化附件并限制请求中的图片总量；这些多模态能力不在本章范围内。工具调用分片留到第 02 章展开，取消与错误的完整生命周期留到持续运行的智能体中处理。
 

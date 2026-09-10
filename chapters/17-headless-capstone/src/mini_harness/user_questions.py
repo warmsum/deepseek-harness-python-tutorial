@@ -1,7 +1,7 @@
-"""第 13 章：用户问答能力接缝。
+"""第 13 章：用户问答服务。
 
 对应官方 ``packages/interaction/user-questions`` 与 ``tool-ask-user``：
-模型工具只负责提出结构化问题，真正怎样展示问题由唯一的 provider 决定。
+模型工具只负责提出结构化问题，展示方式由唯一的服务实现决定。
 教学版循环是同步的，因此 ``ask`` 直接阻塞当前工具调用；等待结束后，答案仍
 作为普通工具结果回到下一步模型请求。
 """
@@ -106,7 +106,7 @@ class UserQuestionError(RuntimeError):
 
 
 class UserQuestionService:
-    """一个 provider，加一条带调用者校验的 ``ask`` 路径。"""
+    """管理唯一问答实现，并在 ``ask`` 时校验调用者。"""
 
     def __init__(self, authority: AgentAuthority | None = None) -> None:
         self._provider: UserQuestionProvider | None = None
@@ -186,7 +186,7 @@ def ask_user_question(
     *,
     agent: object | None = None,
 ) -> str:
-    """执行模型工具：解析问题，等待 provider，再返回紧凑 JSON。"""
+    """解析问题，等待问答实现返回，再生成紧凑 JSON。"""
     raw_questions = arguments.get("questions")
     if not isinstance(raw_questions, list):
         raise TypeError("questions 必须是数组")

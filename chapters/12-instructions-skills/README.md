@@ -38,7 +38,7 @@ Skills（技能）把操作手册分成“简短介绍”和“完整正文”�
 ```markdown
 ---
 name: web-search-guide
-description: 如何使用 Web Search 工具高效搜索网络、挑选来源、引用结果
+description: 如何使用 Web Search 工具搜索网络、筛选来源并引用结果
 ---
 
 # Web Search 使用指南
@@ -96,7 +96,7 @@ class SkillCatalog:
 四个要点：
 
 - `list()` 通过 `_read_frontmatter()` 读到第二个 `---` 就停止，因此扫描菜单时不会加载正文。缺少结束分隔符时立即报错。
-- `load()` 不缓存正文，每次调用都重新读取 `SKILL.md`。这是文件修改能够及时生效的关键。
+- `load()` 不缓存正文，每次调用都重新读取 `SKILL.md`，并重新检查当前 frontmatter 的名称与必填字段。文件修改会在下一次加载时生效。
 - 教学版的解析器只读取 `name` 和 `description` 两个字段，足以生成技能菜单。
 - 技能名只接受由小写字母、数字和连字符组成的格式，而且 frontmatter 中的 `name` 必须与目录名一致。这样既能阻止 `../other-file` 一类路径穿越，也能避免目录和菜单使用不同名称。
 
@@ -160,7 +160,7 @@ uv run python chapters/12-instructions-skills/src/demo.py
 === 模型最初看到的技能目录 ===
 可用技能：
 - git-commit-guide: 如何编写规范的 git commit message（类型、范围、主题、正文）
-- web-search-guide: 如何使用 Web Search 工具高效搜索网络、挑选来源、引用结果
+- web-search-guide: 如何使用 Web Search 工具搜索网络、筛选来源并引用结果
 目录估算: 30 token
 
 === 模型按需加载的技能 ===
@@ -190,9 +190,9 @@ refactor(course): 重写练习使每章含开放思考题与实践题
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/skill/skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/skill/README.zh.md) | `SkillCatalog` | 官方同样提供摘要目录、统一内容渲染和每次重新取正文的渐进式加载 |
+| [`packages/skill/skill/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/skill/skill/README.zh.md) | `SkillCatalog` | 官方同样提供摘要目录、统一内容渲染和每次重新取正文的渐进式加载 |
 | 同上 | （未实现） | 官方还支持多种技能来源、宿主和作用域分层、按优先级解决重名、缓存失效和调用记录；教学版只读取一个磁盘目录 |
-| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/tool-skill/README.zh.md) | `skill` 工具 | 官方把技能目录和 `skill` 工具放在同一个插件中，由模型调用工具读取正文；教学版在本章的最小模型循环中直接注册该工具 |
+| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/skill/tool-skill/README.zh.md) | `skill` 工具 | 官方把技能目录和 `skill` 工具放在同一个插件中，由模型调用工具读取正文；教学版在本章的最小模型循环中直接注册该工具 |
 
 ## 练习
 

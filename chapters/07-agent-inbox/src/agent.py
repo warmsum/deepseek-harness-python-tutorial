@@ -1,8 +1,7 @@
-"""第 07 章：Agent —— 持续对话的完整循环。
+"""第 07 章：持续处理多轮消息的 Agent 循环。
 
-第 06 章的 run_agent 是「一次性」的：一个问题进，一个结果出。
-本章的 Agent 是「常驻」的：随时接收 followup/steer，逐轮处理，
-轮次之间保持同一份会话日志——这正是官方 AgentLoop 的形态。
+第 06 章的 run_agent 只处理一个问题。本章的 Agent 可以接收
+followup/steer 并逐轮处理，轮次之间保持同一份会话日志。
 
 层级术语（与官方对齐）：
 - turn（轮次）：一次「唤醒到完成」的边界，由 turn/start 与 turn/end 夹住；
@@ -13,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from client import DeepSeekClient, Message, Tool
+from client import DeepSeekClient, Message
 from inbox import Inbox
 from prompt import PromptAssembler
 from registry import ToolRegistry
@@ -38,10 +37,11 @@ class Agent:
         self._registry = registry
         self._assembler = assembler
         self._variables = variables
-        self._inbox = Inbox()
         self._session = Session()
+        self._inbox = Inbox(self._session)
         self._turn_no = 0
         self._request_header: str | None = None
+        self._request_generation = 0
         self._retry_policy = retry_policy
 
     # ------------------------------------------------------------------
@@ -50,10 +50,14 @@ class Agent:
 
     def followup(self, content: str) -> None:
         """用户的常规提问：进入下一轮队列。"""
+        if not content.strip():
+            raise ValueError("followup 内容不能为空")
         self._inbox.followup(Message(role="user", content=content))
 
     def steer(self, content: str) -> None:
         """中途引导：进入下一步队列，当前轮次内立刻生效。"""
+        if not content.strip():
+            raise ValueError("steer 内容不能为空")
         self._inbox.steer(Message(role="user", content=content))
 
     @property
@@ -67,17 +71,21 @@ class Agent:
     def run(self, max_turns: int = 5) -> Session:
         """处理 inbox 直到没有待处理消息（教学版同步实现；
         官方在这里是常驻驱动器，空闲时挂起等待唤醒）。"""
-        tools = self._registry.all()
-        tools_by_name = {tool.name: tool for tool in tools}
-
-        while self._inbox.pending > 0 and self._turn_no < max_turns:
-            claimed = self._inbox.claim_turn()
-            if not claimed:
-                break
+        if not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns <= 0:
+            raise ValueError("max_turns 必须是正整数")
+        turns_run = 0
+        while self._inbox.pending > 0 and turns_run < max_turns:
+            turns_run += 1
             self._turn_no += 1
             self._session.append("turn/start", {"turn": self._turn_no})
+            claimed = self._inbox.claim_turn()
+            if not claimed:
+                self._session.append(
+                    "turn/end", {"turn": self._turn_no, "reason": "completed"}
+                )
+                break
             try:
-                self._run_turn(tools, tools_by_name, claimed)
+                self._run_turn(claimed)
             except Exception as error:
                 self._session.append(
                     "turn/end",
@@ -92,43 +100,58 @@ class Agent:
 
     def _run_turn(
         self,
-        tools: list[Tool],
-        tools_by_name: dict[str, Tool],
         claimed: list[Message],
     ) -> None:
-        """一轮内部：反复「领 steer → 请求模型 → 执行工具」直到模型作答。"""
-        for step in range(1, 11):  # 安全阀：单轮最多 10 个 step
+        """一轮内反复领取 steer、请求模型并执行工具，最多运行 10 步。"""
+        for step in range(1, 11):
             if step > 1:
                 claimed = self._inbox.claim_step()
             self._session.append("step/start", {"turn": self._turn_no, "step": step})
             completed = False
             try:
+                system_prompt = self._assembler.render(self._variables)
+                self._session.record_system_prompt(
+                    system_prompt, turn=self._turn_no, step=step
+                )
                 for message in claimed:
                     self._session.append("user/message", {"content": message.content})
 
-                system_prompt = self._assembler.render(self._variables)
-                header = {
-                    "config": {"provider": "deepseek", "model": self._client.MODEL},
-                    "system": system_prompt,
-                    "tools": self._registry.schemas(),
+                tools = self._registry.all()
+                tools_by_name = {tool.name: tool for tool in tools}
+                header: dict[str, object] = {
+                    "config": {
+                        "provider": "deepseek-official",
+                        "model": self._client.MODEL,
+                    }
                 }
+                schemas = self._registry.schemas()
+                if schemas:
+                    header["tools"] = schemas
                 header_fingerprint = json.dumps(
                     header, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 )
-                if header_fingerprint != self._request_header:
+                surface_changed = (
+                    self._session.replace_generation != self._request_generation
+                )
+                if header_fingerprint != self._request_header or surface_changed:
+                    reason = (
+                        "initial"
+                        if self._request_header is None
+                        else "change"
+                        if header_fingerprint != self._request_header
+                        else "series"
+                    )
                     self._session.append(
                         "request/header",
                         {
                             "header": header,
-                            "reason": "initial" if self._request_header is None else "change",
+                            "reason": reason,
                         },
                     )
                     self._request_header = header_fingerprint
+                    self._request_generation = self._session.replace_generation
 
-                messages = [
-                    Message(role="system", content=system_prompt),
-                    *self._session.derive_messages(),
-                ]
+                messages = self._session.derive_messages()
                 while True:
                     try:
                         reply = self._client.chat(messages, tools)

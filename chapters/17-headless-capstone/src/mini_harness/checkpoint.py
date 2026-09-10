@@ -10,11 +10,7 @@ from .session import Session
 
 @dataclass(frozen=True)
 class CheckpointPolicy:
-    """只决定 flush 时机；怎样保存仍由持久化后端负责。
-
-    ``flush`` 的异常不会被吞掉，因此模型适配器或工具正文应当只在这些
-    方法成功返回后运行——这就是 fail-closed。
-    """
+    """决定 flush 时机；保存失败时异常直接返回给调用方。"""
 
     flush: Callable[[Session], None]
 

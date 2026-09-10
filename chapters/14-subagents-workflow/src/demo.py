@@ -40,7 +40,10 @@ def run_local_lifecycles() -> None:
     print("=== ① fork + continuable：继承完整轮次并继续投递 ===")
     parent = Session()
     parent.append("turn/start", {"turn": 1})
+    parent.append("step/start", {"turn": 1, "step": 1})
+    parent.record_system_prompt("你是父 Agent。", turn=1, step=1)
     parent.append("user/message", {"content": "已完成的父任务"})
+    parent.append("step/end", {"turn": 1, "step": 1})
     parent.append("turn/end", {"turn": 1, "reason": "completed"})
     parent.append("turn/start", {"turn": 2})
     parent.append("user/message", {"content": "尚未完成，不应被 fork"})
@@ -118,20 +121,19 @@ def main() -> None:
     elapsed = time.monotonic() - started
     for index, result in enumerate(results, start=1):
         print(f"  [子 agent#{index}] {result.output}  ({result.stop_reason})")
-    print(f"  总耗时: {elapsed:.1f}s（若串行执行约为两倍）")
+    print(f"  总耗时: {elapsed:.1f}s")
 
     print()
     print("=== ⑥ 上下文隔离证据 ===")
-    # 子 agent内部的会话只有 system + task——这里用一个探测会话展示
+    # 子 agent 的模型可见历史只有 system + task；这里用一个探测会话展示。
     probe = Session()
     probe.append("turn/start", {"turn": 1})
+    probe.append("step/start", {"turn": 1, "step": 1})
+    probe.record_system_prompt("你是一个速算助手，直接给出答案。", turn=1, step=1)
     probe.append("user/message", {"content": specs[0][0]})
-    for message in [
-        Message(role="system", content="你是一个速算助手，直接给出答案。"),
-        *probe.derive_messages(),
-    ]:
+    for message in probe.derive_messages():
         print(f"  [{message.role}] {(message.content or '')[:40]}…")
-    print("  ← 父 agent 的对话历史一个字都没进来")
+    print("  ← 子会话未自动继承父 agent 的对话历史")
 
     print()
     print("=== ⑦ 主 agent 汇总 ===")

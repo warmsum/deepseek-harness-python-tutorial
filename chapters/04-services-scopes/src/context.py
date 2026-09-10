@@ -4,7 +4,7 @@
 1. `provide` / `get` —— 服务的注册与查找
 2. `inject` 依赖声明 —— 依赖未齐时插件保持 pending，服务后到自动启动
 3. `__getattr__` 严格访问 —— 读服务必须先声明依赖
-4. `waterfall` —— waterfall 模型事件（可拦截管线）
+4. `waterfall` —— 可以包裹核心执行器的顺序处理链
 
 对应官方 vendor/cordis 的 reflect（服务）与 events（瀑布）模块。
 """
@@ -18,7 +18,7 @@ PluginFn = Callable[["Context", Any], Disposer | None]
 
 
 def _once(disposer: Disposer) -> Disposer:
-    """返回 single-shot disposer，手动释放与插件卸载不会重复执行。"""
+    """包装清理函数，使手动释放与插件卸载合计只执行一次。"""
     active = True
 
     def run() -> None:
@@ -68,8 +68,8 @@ class PluginHandle:
     # ------------------------------------------------------------------
 
     def _recheck(self) -> None:
-        """重算依赖签名（epoch）。签名变化才动作，避免重复启动。"""
-        if self.state == "disposed":
+        """重算依赖签名（epoch），只在签名变化时更新插件状态。"""
+        if self.state in {"disposed", "failed"}:
             return
         resolved: dict[str, object] = {}
         tokens: list[str] = []
@@ -186,7 +186,7 @@ class Context:
     # ------------------------------------------------------------------
 
     def provide(self, name: str, value: object) -> Disposer:
-        """注册一个服务。服务出现 → 通知全体重算依赖（自动启动的触发点）。"""
+        """注册服务，并通知所有句柄重新计算依赖。"""
         root = self._root_context()
         if name in root._services:
             raise ValueError(f'服务 "{name}" 已被注册')
@@ -195,7 +195,6 @@ class Context:
         provider_uid = owner.uid if owner is not None else 0
         registration = (value, provider_uid, root._version)
         root._services[name] = registration
-        root._notify()
 
         def unregister_service() -> None:
             if root._services.get(name) is registration:
@@ -205,6 +204,11 @@ class Context:
         unregister = _once(unregister_service)
         if owner is not None:
             owner.collect(unregister)  # 提供者卸载 → 服务随之注销
+        try:
+            root._notify()
+        except Exception:
+            unregister()
+            raise
         return unregister
 
     def get(self, name: str) -> object | None:
@@ -222,12 +226,12 @@ class Context:
     # ------------------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
-        """属性查找失败时被调用——ctx.tools 这类「服务访问」走这里。
+        """处理 ctx.tools 形式的服务属性访问。
 
         三种结局（对应官方 reflect 的 Proxy get trap）：
         1. 当前插件声明了依赖且已就绪 → 返回服务值
         2. 声明了依赖但未就绪 → 报「依赖未就绪」
-        3. 没声明 → 报「必须先 inject」（依赖显式化是语法，不是约定）
+        3. 没有声明 → 报告必须先在 inject 中声明
         """
         root = self._root_context()
         handle = self._owner or root._current
@@ -264,7 +268,7 @@ class Context:
             listener(*args)
 
     def waterfall(self, event: str, *args: Any) -> Any:
-        """waterfall 模型事件。最后一个参数是 next（最内层执行器）。
+        """执行 waterfall 处理链；最后一个参数是最内层执行器。
 
         每个监听器收到 (…args, next)；调 next() 继续向里传，返回值沿链
         回传。监听器调 next() 不带参数时，原参数原样向下传；带参数则用

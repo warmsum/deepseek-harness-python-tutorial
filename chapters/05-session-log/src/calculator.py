@@ -1,8 +1,7 @@
 """安全 calculator 工具（第 02 章首次实现）。
 
-教学要点：工具是「真实代码的入口」。模型只负责描述意图（"1+2*3"），
-真正的计算在 Agent 进程里完成。安全边界划在这里：我们绝不用 eval，
-而是手写一个递归下降解析器——模型传来的字符串是不可信输入。
+模型负责描述意图（"1+2*3"），Agent 进程负责执行计算。输入来自模型，
+因此实现使用只接受数字与四则运算符的递归下降解析器，不调用 `eval`。
 
 语法（标准优先级，支持括号与一元负号）：
     expression := term (("+" | "-") term)*
@@ -12,6 +11,7 @@
 
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any
 
 from client import Tool
@@ -27,6 +27,8 @@ def _evaluate(source: str) -> float:
 
     def take() -> str:
         nonlocal position
+        if position >= len(tokens):
+            raise ValueError("表达式意外结束")
         token = tokens[position]
         position += 1
         return token
@@ -53,7 +55,7 @@ def _evaluate(source: str) -> float:
         return value
 
     def parse_factor() -> float:
-        token = take()  # 末尾会抛 IndexError，由调用方转成错误信息
+        token = take()
         if token == "(":
             value = parse_expression()
             if take() != ")":
@@ -61,11 +63,16 @@ def _evaluate(source: str) -> float:
             return value
         if token == "-":
             return -parse_factor()  # 一元负号：-x 等价于 0 - x
-        return float(token)
+        value = float(token)
+        if not isfinite(value):
+            raise ValueError("数字超出有限范围")
+        return value
 
     result = parse_expression()
     if position != len(tokens):
-        raise ValueError(f"表达式在 {tokens[position]!r} 处意外结束")
+        raise ValueError(f"表达式包含未解析内容: {tokens[position]!r}")
+    if not isfinite(result):
+        raise ValueError("计算结果超出有限范围")
     return result
 
 

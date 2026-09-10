@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from client import DeepSeekClient, Message, Tool
+from client import DeepSeekClient, Tool
 from session import Session
 
 
@@ -20,41 +20,46 @@ def run_agent(
     user_prompt: str,
     max_steps: int = 10,
 ) -> Session:
-    """跑一轮带工具调用的对话，全部过程记录进事件日志。"""
+    """运行一轮工具对话，并把完整过程记录到事件日志。"""
     tools_by_name = {tool.name: tool for tool in tools}
     session = Session()
 
     session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": user_prompt})
-    session.append(
-        "request/header",
-        {
-            "header": {
-                "config": {"provider": "deepseek", "model": client.MODEL},
-                "system": system_prompt,
-                "tools": [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                    for tool in sorted(tools, key=lambda item: item.name)
-                ],
-            },
-            "reason": "initial",
-        },
-    )
 
     try:
         for step in range(1, max_steps + 1):
             session.append("step/start", {"turn": 1, "step": step})
             completed = False
             try:
-                # 关键：模型看到的历史永远是日志的「投影」，不是日志本身
-                messages = [
-                    Message(role="system", content=system_prompt),
-                    *session.derive_messages(),
-                ]
+                session.record_system_prompt(system_prompt, turn=1, step=step)
+                if step == 1:
+                    session.append("user/message", {"content": user_prompt})
+                    header: dict[str, object] = {
+                        "config": {
+                            "provider": "deepseek-official",
+                            "model": client.MODEL,
+                        }
+                    }
+                    schemas = [
+                        {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                        for tool in sorted(tools, key=lambda item: item.name)
+                    ]
+                    if schemas:
+                        header["tools"] = schemas
+                    session.append(
+                        "request/header",
+                        {
+                            "header": header,
+                            "reason": "initial",
+                        },
+                    )
+
+                # 系统提示词和普通历史都来自同一份日志投影。
+                messages = session.derive_messages()
                 reply = client.chat(messages, tools)
                 session.append(
                     "assistant/message",

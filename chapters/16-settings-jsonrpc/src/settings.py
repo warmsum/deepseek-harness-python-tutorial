@@ -177,6 +177,12 @@ class Settings:
     ) -> None:
         registration = self._require(namespace)
         actual = self._revisions[namespace]
+        if expected_revision is not None and (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 0
+        ):
+            raise TypeError("expected_revision 必须是非负整数或 None")
         if expected_revision is not None and expected_revision != actual:
             raise SettingsConflictError(namespace, expected_revision, actual)
         previous = self.get(namespace)

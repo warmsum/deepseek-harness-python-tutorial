@@ -87,7 +87,7 @@ class DeepSeekClient:
 
     def chat(self, messages: list[Message], tools: list[Tool]) -> Message:
         payload = {
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [self._wire(message) for message in messages],
             "tools": [
                 {

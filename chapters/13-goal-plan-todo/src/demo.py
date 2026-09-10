@@ -133,7 +133,9 @@ def main() -> None:
         "\n日志恢复出的目标: "
         + (f"r{current.revision} [{current.phase}] {current.objective}" if current else "无")
     )
-    todo_events = [event for event in session.events if event.type == "todo/write"]
+    todo_events = [
+        event for event in session.snapshot_events() if event.type == "todo/write"
+    ]
     print(f"日志中的任务清单写入次数: {len(todo_events)}")
 
 

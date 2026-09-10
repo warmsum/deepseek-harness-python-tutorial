@@ -1,11 +1,11 @@
-"""第 14 章：Subagent —— 把工作委派给子 agent。
+"""第 14 章：子智能体委派与独立会话。
 
 对应官方 packages/subagent/subagent + tool-subagent。
 教学版沿用第 04 章讨论的“状态隔离”目标，但不使用那一章的 Context：
-子 agent = 一个独立的运行环境：自己的会话、自己的工具子集，
-只看到父 agent 交给它的 task 描述——父对话历史一个字都不带。
+子 agent 使用独立的运行环境、会话和工具子集，只接收父 agent 提供的
+task 描述，不自动继承父对话历史。
 
-两个必须教的点：
+本章保留两个核心行为：
 1. 上下文隔离：子 agent 看不到父历史，这正是 subagent 省 token 的原因；
 2. 并行：一轮里的多个子任务同时跑（官方按 isConcurrencySafe 并行调度）。
 """
@@ -18,7 +18,7 @@ from threading import Event, Lock
 from typing import Protocol
 from uuid import uuid4
 
-from .client import ChatClient, Message
+from .client import ChatClient
 from .session import Session
 
 
@@ -27,11 +27,10 @@ class SubagentResult:
     """子 agent 的一次运行结果。
 
     对应官方 SubagentRun.result → { output, stopReason, diagnostic? }：
-    output 只放子 agent 的回答，失败诊断单独存放，避免把运行时错误
-    冒充成子 agent 说过的话。失败路径仍保留已生成的部分文本。"""
+    output 只放子 agent 的回答，失败诊断单独存放。"""
 
     output: str
-    stop_reason: str  # "completed" / "max-steps" / "error"
+    stop_reason: str  # "completed" / "max-steps" / "interrupted" / "error"
     diagnostic: str | None = None
 
 
@@ -56,59 +55,67 @@ def run_subagent(
     session: Session | None = None,
     cancelled: CancellationSignal | None = None,
 ) -> SubagentResult:
-    """运行一个子 agent：独立的 Session，只见 task，不见父历史。
+    """在独立 Session 中运行子 agent，只接收 task 和系统提示词。
 
-    上下文隔离是这里的关键——父 agent 的对话历史可能有几万 token，
-    而一个子任务往往只需要一句 task 描述。把历史挡在门外，
-    每个子 agent 的输入都从零开始（官方 fork 是例外，见本章对照表）。"""
+    默认不继承父历史；需要继承已完成轮次时由调用方传入 fork 会话。"""
     child_session = session or Session()
-    turn = 1 + sum(1 for event in child_session.events if event.type == "turn/start")
+    turn = 1 + sum(
+        1 for event in child_session.snapshot_events() if event.type == "turn/start"
+    )
     child_session.append("turn/start", {"turn": turn})
-    child_session.append("user/message", {"content": task})
 
     partial: str = ""
     try:
-        for _step in range(max_steps):
+        for step in range(1, max_steps + 1):
             if cancelled is not None and cancelled.is_set():
                 child_session.append(
                     "turn/end", {"turn": turn, "reason": "interrupted"}
                 )
                 return SubagentResult(partial, "interrupted")
-            reply = client.chat(
-                [
-                    Message(role="system", content=system_prompt),
-                    *child_session.derive_messages(),
-                ]
-            )
-            if cancelled is not None and cancelled.is_set():
+            child_session.append("step/start", {"turn": turn, "step": step})
+            interrupted = False
+            completed = False
+            try:
+                child_session.record_system_prompt(
+                    system_prompt, turn=turn, step=step
+                )
+                if step == 1:
+                    child_session.append("user/message", {"content": task})
+                reply = client.chat(child_session.derive_messages())
+                if cancelled is not None and cancelled.is_set():
+                    interrupted = True
+                else:
+                    child_session.append(
+                        "assistant/message",
+                        {
+                            "content": reply.content,
+                            **(
+                                {"reasoning_content": reply.reasoning_content}
+                                if reply.reasoning_content
+                                else {}
+                            ),
+                            "tool_calls": [],
+                        },
+                    )
+                    partial = reply.content or ""
+                    completed = bool(reply.content)
+            finally:
+                child_session.append("step/end", {"turn": turn, "step": step})
+            if interrupted:
                 child_session.append(
                     "turn/end", {"turn": turn, "reason": "interrupted"}
                 )
                 return SubagentResult(partial, "interrupted")
-            child_session.append(
-                "assistant/message",
-                {
-                    "content": reply.content,
-                    **(
-                        {"reasoning_content": reply.reasoning_content}
-                        if reply.reasoning_content
-                        else {}
-                    ),
-                    "tool_calls": [],
-                },
-            )
-            partial = reply.content or ""
-            if reply.content:
+            if completed:
                 child_session.append("turn/end", {"turn": turn, "reason": "completed"})
-                return SubagentResult(output=reply.content, stop_reason="completed")
+                return SubagentResult(output=partial, stop_reason="completed")
         child_session.append("turn/end", {"turn": turn, "reason": "max-steps"})
         return SubagentResult(
             output=partial,
             stop_reason="max-steps",
         )
     except Exception as error:  # noqa: BLE001 - 子 Agent 需要结算所有失败路径
-        # 失败保留部分文本：被截断的回答不会被报告为成功，
-        # 也不会被悄悄丢弃。
+        # 把运行失败写入 diagnostic，不把异常文本作为模型回答返回。
         child_session.append(
             "turn/end", {"turn": turn, "reason": "error", "message": str(error)}
         )
@@ -122,12 +129,13 @@ def run_subagent(
 def fork_session(parent: Session) -> Session:
     """复制父日志的最后完整 turn 前缀；当前开放 turn 完全排除。"""
     last_turn_end = -1
-    for index, event in enumerate(parent.events):
+    events = parent.snapshot_events()
+    for index, event in enumerate(events):
         if event.type == "turn/end":
             last_turn_end = index
     if last_turn_end < 0:
         return Session()
-    return Session.from_log(parent.events[: last_turn_end + 1])
+    return Session.from_log(events[: last_turn_end + 1])
 
 
 class ContinuableSubagent:

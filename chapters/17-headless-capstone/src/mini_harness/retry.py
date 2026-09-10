@@ -1,6 +1,6 @@
 """第 07 章：提供方级 LLM retry 策略。
 
-官方把策略放在 provider 配置上，把执行放在 Agent 的 request-error 边界。
+官方把策略放在模型提供方配置上，把执行接入 Agent 的请求错误边界。
 这里保留有限预算、错误码、Retry-After、有界指数退避、jitter 和两条持久
 事件；时间函数可注入，让测试不用真的等待。
 """
@@ -35,7 +35,7 @@ class RetryPolicy:
     initial_delay_ms: float = 500
     max_delay_ms: float = 10_000
     jitter_ratio: float = 0.1
-    provider: str = "deepseek"
+    provider: str = "deepseek-official"
     sleeper: Callable[[float], None] = time.sleep
     random_sample: Callable[[], float] = random.random
 
@@ -89,7 +89,7 @@ class RetryPolicy:
         prior = next(
             (
                 event
-                for event in reversed(session.events)
+                for event in reversed(session.snapshot_events())
                 if event.type == "llm/retry"
                 and event.data.get("turn") == turn
                 and event.data.get("step") == step
@@ -137,9 +137,14 @@ class RetryPolicy:
         return True
 
     def _local_delay(self, retry: int) -> float:
-        exponential = min(
-            self.initial_delay_ms * 2 ** min(retry - 1, 1024),
-            self.max_delay_ms,
+        growth_steps = retry - 1
+        saturation = math.ceil(
+            math.log2(self.max_delay_ms / self.initial_delay_ms)
+        )
+        exponential = (
+            self.max_delay_ms
+            if growth_steps >= saturation
+            else self.initial_delay_ms * 2**growth_steps
         )
         jitter = 1 - self.jitter_ratio + 2 * self.jitter_ratio * self.random_sample()
         return float(min(exponential * jitter, self.max_delay_ms))

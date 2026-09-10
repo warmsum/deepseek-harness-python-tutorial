@@ -48,7 +48,7 @@
 | 操作 | 效果 | 状态变化 |
 |------|------|----------|
 | `create` | 建立目标 | revision=1、phase=active、启用续行 |
-| `edit` | 改目标文本 | 保留 phase、blocker reason 与 activation |
+| `edit` | 改目标文本或轮次上限 | 保留 phase、blocker reason 与 activation |
 | `pause` / `resume` | 暂停 / 恢复 | 停用 / 恢复续行；resume 清除阻塞原因 |
 | `complete` | 完成 | 停用续行 |
 | `block` | 阻塞 | 记录文本说明，只用一个持久 phase |
@@ -57,7 +57,9 @@
 
 第一，同一时间最多只有一个当前目标。已经完成的目标可以被新目标替换，但不能同时维护多个含义不清的进行中目标。
 
-第二，“是否立即继续执行”不会写入持久化状态。会话从中断中恢复后，即使目标仍是 `active`，智能体也不会自动继续，必须显式调用 `resume`。恢复后的工作区和依赖可能已经变化，先停下来确认比直接继续更安全。
+第二，“是否立即继续执行”不会写入持久化状态。会话从中断中恢复后，即使目标仍是 `active`，续行状态也会恢复为 `disarmed`，直到新的直接用户请求明确要求继续。持久状态为 `paused` 时，模型工具不能自行恢复；恢复操作属于用户控制入口。
+
+官方默认允许一个目标开始 256 个 Goal Round。`GoalStore.create()` 使用同一默认值；调用方也可以给出 JSON 安全范围内的正整数覆盖。`edit` 可以调整上限，但不能降到已经开始的 Round 数以下；Round 数达到上限后，`resume` 会被拒绝。
 
 ## 13.3 用 GoalStore 和版本号保护更新
 
@@ -80,9 +82,13 @@ class Goal:
 ```python
     def resume(self, ref: GoalRef) -> GoalRef:
         current = self._require(ref)
+        if current.phase not in {PHASE_ACTIVE, PHASE_PAUSED, PHASE_BLOCKED}:
+            raise ValueError(f"{current.phase} 目标不能 resume")
+        if current.phase == PHASE_ACTIVE and self._armed:
+            raise ValueError("目标已经 active 且已启用续行")
         if current.rounds_started >= current.max_rounds:
             raise ValueError("目标轮次已达上限，无法 resume")
-        self._commit(self._with_phase(current, PHASE_ACTIVE, None), "resume")
+        self._commit(self._with_phase(current, PHASE_ACTIVE, None), "resume", armed=True)
         return GoalRef(id=current.id, revision=current.revision + 1)
 ```
 
@@ -104,17 +110,19 @@ class Goal:
 
 为什么每次操作都要检查 `revision`？假设智能体 A 根据 r3 版本决定暂停目标，而智能体 B 已经把目标推进到 r5。如果仍允许 A 提交，旧决定就可能覆盖 B 的新进展。版本检查会拒绝这种基于旧状态的修改，并要求调用方重新读取当前目标。这是一种乐观并发控制方法。
 
+第 17 章面向模型的 `update_goal` 要求显式传入 `goal_id` 和 `revision`，工具不会自行读取最新版本。模型必须先调用 `get_goal`，再基于刚取得的引用提交更新。工具动作使用官方名称 `blocked`；领域层记录的操作仍名为 `block`。
+
 ## 13.4 从事件恢复目标
 
 每个动词最后都做同一件事，`_commit` 追加事件：
 
 ```python
     def _commit(self, goal: Goal, operation: str) -> None:
-        self._current = goal
         self._session.append(
             "goal/change",
             {"version": 1, "operation": operation, "goal": _goal_to_dict(goal)},
         )
+        self._current = goal
 ```
 
 `goal/change` 同时记录操作名和变更后的完整快照，因此目标状态可以像第 05 章的会话一样通过事件重建。`clear()` 会写入一条删除标记，英文常称为 tombstone，明确记录“这个目标被删除了”，而不是让状态无缘无故消失。
@@ -123,7 +131,7 @@ class Goal:
     @classmethod
     def replay(cls, session: Session) -> "GoalStore":
         store = cls(session)
-        for event in session.events:
+        for event in session.snapshot_events():
             if event.type == "user/message":
                 source = event.data.get("source")
                 if isinstance(source, dict) and source.get("kind") == "goal":
@@ -139,7 +147,7 @@ class Goal:
 
 `admit_round()` 追加的是一条注明来自目标的 `user/message`。它表示智能体开始处理新一轮目标消息，不是修改目标本身，因此只增加 `rounds_started`，不会增加 `revision`。版本连续性只在同一个目标内检查；创建新目标时重新从 r1 开始。
 
-教学版会检查目标编号、版本号、轮次和删除标记是否连续，但没有实现官方的全部数据形状、非法状态迁移和时间戳顺序检查。练习 2 会继续设计状态迁移规则。
+教学版检查目标编号、版本号、关键状态迁移、轮次和删除标记是否连续，但没有实现官方的完整数据形状和时间戳顺序检查。`GoalStore.replay()` 只恢复持久状态，进程内续行权限保持 `disarmed`。
 
 ## 13.5 任务清单 Todo：每次写入完整列表
 
@@ -181,10 +189,8 @@ for step in range(1, max_steps + 1):
     plan_section = plan_mode.prompt_section()
     if plan_section:
         system_prompt += "\n\n" + plan_section
-    reply = client.chat(
-        [Message("system", system_prompt), *session.derive_messages()],
-        tools,
-    )
+    session.record_system_prompt(system_prompt, turn=1, step=step)
+    reply = client.chat(session.derive_messages(), tools)
 ```
 
 `exit_plan_mode` 获批时只把退出选择放入待生效状态。`create_goal` 和 `todo_write` 还会检查当前是否仍处于计划模式，因此模型即使把它们与退出工具放在同一批调用中，也不会提前实施。下一步骤提交 `plan/mode=false` 后，目标和清单工具才会成功。
@@ -226,24 +232,25 @@ Updated todo list: 2 pending, 1 in progress, 0 completed.
 
 ## 本章小结
 
-- `Goal`：用四种状态和六种操作管理一个长期目标
+- `Goal`：用四种状态和六种领域操作管理一个长期目标
 - `UserQuestionService`：统一传递结构化问题与答案，并限制由当前根智能体发起
 - `PlanModeController`：记录计划模式，让退出选择在下一步骤生效
 - `GoalRef`：通过目标编号和版本号拒绝过期修改
 - `goal/change`：保存完整目标快照，并支持从日志恢复
 - `todo_write`：整体替换任务清单，校验内容和状态
 - 真实模型流程：范围确认、计划评审、模式切换、目标和清单共用一个事件驱动循环
-- 恢复后不会自动续行，必须重新确认当前环境后再继续
+- 恢复后续行状态为 `disarmed`；持久暂停的目标只能由用户入口恢复
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/goal/goal/README.zh.md) | `GoalStore` | 保留从事件恢复状态、`GoalRef` 版本保护、单一目标、六种操作、完整快照和恢复后不自动续行；教学版只校验事件连续性 |
+| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/goal/goal/README.zh.md) | `GoalStore` | 保留事件恢复、`GoalRef` 版本保护、单一目标、状态转换、进程内 activation 和恢复后停用续行；教学版省略完整投影注册表与时间戳校验 |
+| [`packages/goal/tool-goal/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/goal/tool-goal/README.zh.md) | 第 17 章的 goal 工具 | 工具要求模型回传精确 `goal_id` 与 `revision`；持久 `paused` 目标不能由模型恢复 |
 | 同上 | `admit_round` | 官方只有已经接收且来源为目标的 `user/message` 才会增加目标轮数；普通用户对话不会增加 `roundsStarted` |
-| [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/todo/tool-todo/README.zh.md) | `todo_write` | 对齐整体替换、完整快照、三值状态、内容校验与可配置的并行进行中策略 |
-| [`packages/interaction/user-questions/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-questions/README.zh.md) | `UserQuestionService` | 与官方一样只允许一个交互界面，拒绝空问题和非法调用方；教学版会同步等待用户回答 |
-| [`packages/plan/plan-mode/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/plan/plan-mode/README.zh.md) | `PlanModeController` | 与官方一样由最后一条事件决定模式，在步骤边界提交选择，并要求用户明确评审计划；教学版没有 `/plan` 命令 |
+| [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/todo/tool-todo/README.zh.md) | `todo_write` | 对齐整体替换、完整快照、三值状态、内容校验与可配置的并行进行中策略 |
+| [`packages/interaction/user-questions/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/interaction/user-questions/README.zh.md) | `UserQuestionService` | 与官方一样只允许一个交互界面，拒绝空问题和非法调用方；教学版会同步等待用户回答 |
+| [`packages/plan/plan-mode/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/plan/plan-mode/README.zh.md) | `PlanModeController` | 与官方一样由最后一条事件决定模式，在步骤边界提交选择，并要求用户明确评审计划；教学版没有 `/plan` 命令 |
 
 长期目标、计划模式与任务清单分别回答三个问题：长任务是否继续、当前如何协作、眼前有哪些步骤。它们不能互相替代。
 

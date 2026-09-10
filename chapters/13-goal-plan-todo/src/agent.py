@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from client import DeepSeekClient, Message, Tool
+from client import DeepSeekClient, Tool
 from plan import PlanModeController
 from session import Session
 
@@ -36,13 +36,12 @@ def run_agent(
     by_name = {tool.name: tool for tool in tools}
     traces: list[ToolTrace] = []
     session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": user_prompt})
+    request_header: str | None = None
+    request_generation = 0
 
     for step in range(1, max_steps + 1):
         notice = plan_mode.apply_boundary()
         session.append("step/start", {"turn": 1, "step": step})
-        if notice:
-            session.append("user/message", {"content": notice})
         system_prompt = (
             "你是任务规划助手。严格按照用户指定的工具顺序工作；"
             "工具成功前不要声称已经完成。"
@@ -50,17 +49,42 @@ def run_agent(
         plan_section = plan_mode.prompt_section()
         if plan_section:
             system_prompt += "\n\n" + plan_section
-        session.append(
-            "request/header",
+        session.record_system_prompt(system_prompt, turn=1, step=step)
+        if step == 1:
+            session.append("user/message", {"content": user_prompt})
+        if notice:
+            session.append("user/message", {"content": notice})
+        header: dict[str, object] = {
+            "config": {"provider": "deepseek-official", "model": client.MODEL},
+        }
+        schemas = [
             {
-                "step": step,
-                "plan_mode": plan_mode.get().active,
-                "tools": [tool.name for tool in tools],
-            },
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+            for tool in sorted(tools, key=lambda item: item.name)
+        ]
+        if schemas:
+            header["tools"] = schemas
+        fingerprint = json.dumps(
+            header, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        reply = client.chat(
-            [Message("system", system_prompt), *session.derive_messages()], tools
-        )
+        surface_changed = session.replace_generation != request_generation
+        if fingerprint != request_header or surface_changed:
+            reason = (
+                "initial"
+                if request_header is None
+                else "change"
+                if fingerprint != request_header
+                else "series"
+            )
+            session.append(
+                "request/header", {"header": header, "reason": reason}
+            )
+            request_header = fingerprint
+            request_generation = session.replace_generation
+        reply = client.chat(session.derive_messages(), tools)
         session.append(
             "assistant/message",
             {

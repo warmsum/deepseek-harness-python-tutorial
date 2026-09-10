@@ -1,6 +1,6 @@
 """系统提示词组装器（第 06 章首次实现）。
 
-对应官方 packages/core/system-prompt：插件可以贡献「有序段」、
+对应官方 packages/core/system-prompt：插件可以贡献有序段、
 工具 schema 和具名变量，循环在每个步骤组装一次。
 教学版实现其中的段贡献与变量替换两个核心机制。
 """
@@ -22,13 +22,7 @@ class PromptSection:
 
 
 class PromptAssembler:
-    """把多个贡献者提供的提示词段组装成完整系统提示词。
-
-    为什么系统提示词要「组装」而不是一块写死？因为真实 Agent 的
-    提示词来自多个插件：人设插件贡献一段人设、工具插件贡献工具目录、
-    沙箱插件贡献安全规则……每个插件只管自己那一段，组装器负责排序
-    拼接。官方把这种贡献叫 section（段），顺序由 order 字段决定。
-    """
+    """按 order 和 name 组装多个插件贡献的系统提示词段。"""
 
     def __init__(self) -> None:
         self._sections: list[PromptSection] = []
@@ -61,11 +55,10 @@ class PromptAssembler:
     def render(self, variables: dict[str, str] | None = None) -> str:
         """按 order 排序拼接全部段，并替换 {{变量}} 占位符。
 
-        变量 provider 的用途：提示词里需要
-        运行时才知道的值——模型名、当前目录、日期。段文本写
-        {{model}}，组装时用真实值替换。
+        provider 在渲染时提供模型名、当前目录和日期等运行时值。
+        段文本使用 {{model}} 形式引用变量。
         """
-        ordered = sorted(self._sections, key=lambda s: s.order)
+        ordered = sorted(self._sections, key=lambda s: (s.order, s.name))
         text = "\n\n".join(section.text for section in ordered)
         resolved = {name: provider() for name, provider in self._variables.items()}
         resolved.update(variables or {})
@@ -78,4 +71,4 @@ class PromptAssembler:
 
     @property
     def sections(self) -> tuple[PromptSection, ...]:
-        return tuple(sorted(self._sections, key=lambda s: s.order))
+        return tuple(sorted(self._sections, key=lambda s: (s.order, s.name)))

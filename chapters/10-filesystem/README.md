@@ -19,7 +19,7 @@
 - 实现 read、write、edit、grep 与 glob 这组基础文件工具；
 - 把文件函数注册为模型工具，让模型在同一条流程中读取、修改并复查文件。
 
-## 10.1 两道保护：限制范围，检查变化
+## 10.1 两项约束：写入范围与版本检查
 
 第一道保护是三种文件访问模式：
 
@@ -33,9 +33,9 @@
 
 第二道保护是读后写检查。程序要求智能体在修改已有文件前先读取它，并在读取时记录文件状态；真正写入前，再确认文件没有被其他程序修改。这种“先记录旧值，写入前再比较”的方法称为 CAS（compare-and-swap）。没有读过就写时返回 `FS_NOT_OBSERVED`；读过以后文件又发生变化时返回 `FS_STALE_VERSION`，要求重新读取。这与人工修改代码的习惯一致：先查看当前内容，发现别人改过后再重新确认。
 
-## 10.2 沙箱围栏：fence_write
+## 10.2 路径围栏：fence_write
 
-围栏是本章的安全核心，代码不长，每一行都有讲究：
+路径围栏在写入前规范化目标，并检查它是否位于允许的目录中：
 
 ```python
 @dataclass(frozen=True)
@@ -78,7 +78,7 @@ class SandboxPolicy:
 
 这里需要明确能力边界：路径围栏是一项约束，不是内核级安全隔离。它能够阻止模型误写工作区之外的路径，但不能抵御恶意代码主动绕过。第 11 章会进一步说明 shell 命令所需的内核级隔离。
 
-## 10.3 观察器：读后写的两道门
+## 10.3 观察器：读后写检查
 
 ```python
 @dataclass
@@ -143,7 +143,7 @@ def edit_file(path, old_string, new_string, policy, tracker, replace_all=False):
     return f"updated {target} ({count} 处替换)"
 ```
 
-歧义报错是教学重点。模型经常写出太短的 old_string，两个字在文件里出现两次，这时拒绝并说明原因，比悄悄改第一处好得多，模型下一轮会给出更具体的匹配串。错误信息本身就是给模型看的指导。
+当 `old_string` 匹配多处时，工具拒绝修改并返回匹配数量，模型可以在下一步提供更具体的原文。空字符串也会被拒绝，因为它会在每个字符边界产生匹配。
 
 `grep` 与 `glob` 是搜索工具，正则搜内容、模式找文件，完整实现见源码。
 
@@ -209,15 +209,15 @@ read({'path': 'todo.txt'})
 - `ObservationTracker`：读取时记录修改时间，写入前检查文件是否变化
 - 五个工具：read 带行号与页脚并记录观察，write 全量写入，edit 唯一匹配 str-replace，grep 搜内容，glob 找文件
 - 真实模型流程：工具调用、文件结果回灌和修改后复查位于同一个循环中
-- 升级审批：严格更宽表
+- 权限升级：只允许切换到预先声明的更宽模式
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
-| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方同样要求写入基于最近一次读取的版本，并通过文件事件记录写入意图和观察结果；教学版只比较修改时间 `mtime` |
-| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/tool-fs/README.zh.md) | 五个工具函数 | 官方工具层还会把 `FsError` 转换成模型可以理解的沙箱错误标记 |
+| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
+| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方同样要求写入基于最近一次读取的版本，并通过文件事件记录写入意图和观察结果；教学版只比较修改时间 `mtime` |
+| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/fs/tool-fs/README.zh.md) | 五个工具函数 | 官方工具层还会把 `FsError` 转换成模型可以理解的沙箱错误标记 |
 
 ## 练习
 

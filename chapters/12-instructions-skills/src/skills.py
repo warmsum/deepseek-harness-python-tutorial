@@ -1,4 +1,4 @@
-"""第 12 章：Skills —— 按需加载的指令体。
+"""第 12 章：Skills 的目录与按需加载。
 
 对应官方 packages/skill/skill。核心决策是渐进式加载：
 get() 每次调用都向胜出提供方请求正文，
@@ -31,8 +31,7 @@ def estimate_tokens(text: str) -> int:
 class SkillSummary:
     """模型可见的技能摘要：只有名字与一句话描述。
 
-    这是渐进加载的前提——目录里绝不出现技能正文，
-    模型看到的是「有哪些技能可用」，而不是技能内容本身。"""
+    目录只包含技能名称和说明；完整正文由工具按需读取。"""
 
     name: str
     description: str
@@ -69,15 +68,16 @@ class SkillCatalog:
     def load(self, name: str) -> str:
         """渐进加载：每次调用都从磁盘重读正文（不缓存）。
 
-        为什么每次重读？技能文件可能被用户随时编辑——缓存会让
-        Agent 拿着旧指令干活。每次调用重新请求正文，正是为了拿到
-        最新版本。"""
+        技能文件可能在会话期间更新；每次读取可以取得当前版本。"""
         if not SKILL_NAME.fullmatch(name):
             raise ValueError(f"无效的技能名: {name!r}")
         skill_file = self.root / name / "SKILL.md"
         if not skill_file.is_file():
             raise FileNotFoundError(f"技能 {name} 不存在")
         text = skill_file.read_text(encoding="utf-8")
+        frontmatter = _parse_frontmatter(text)
+        if frontmatter["name"] != name:
+            raise ValueError(f"{skill_file} 的 name 必须与目录名 {name!r} 一致")
         return _strip_frontmatter(text)
 
     def render(self, name: str) -> str:
@@ -101,7 +101,7 @@ class SkillCatalog:
         )
 
     def catalog_text(self) -> str:
-        """目录消息：模型每轮都能看到的「技能菜单」（只有摘要）。"""
+        """生成每轮提供给模型的技能摘要目录。"""
         lines = ["可用技能："]
         for summary in self.list():
             lines.append(f"- {summary.name}: {summary.description}")
@@ -135,11 +135,16 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
             break
         if ":" in line:
             key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
+            key = key.strip()
+            if key in fields:
+                raise ValueError(f"frontmatter 字段重复: {key}")
+            fields[key] = value.strip()
     if not closed:
         raise ValueError("SKILL.md 的 frontmatter 缺少结束 ---")
     if "name" not in fields or "description" not in fields:
         raise ValueError("frontmatter 必须包含 name 与 description")
+    if not fields["name"] or not fields["description"]:
+        raise ValueError("frontmatter 的 name 与 description 不能为空")
     return fields
 
 

@@ -2,7 +2,7 @@
 
 官方在 Worker Thread 中执行 JavaScript 编排脚本。教学版直接接收 Python
 callable，保留 parallel、无 barrier 的逐项 pipeline、失败项变为 ``None``
-和上限语义；线程不是安全边界，不能执行不可信代码。
+和上限语义。线程不隔离代码权限，因此输入必须来自受信任的 Python 代码。
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class WorkflowEngine:
             return [future.result() for future in futures]
 
     def pipeline(self, items: Iterable[Any], *stages: Stage) -> list[Any]:
-        """每个 item 连续跑完自己的 stages，不在 stage 之间设全局 barrier。"""
+        """每个 item 依次完成各阶段，阶段之间不设置全局 barrier。"""
         materialized = list(items)
         self._check_count(len(materialized) * max(1, len(stages)))
 

@@ -57,8 +57,8 @@ OpenAI 兼容协议里，模型回复一条消息时可以走两条通道之一�
 
 三个必须记住的细节：
 
-1. `arguments` 是 JSON 字符串，不是对象。协议规定参数以文本传输，执行前必须 `json.loads` 解析。这是新手最常见的坑，直接拿字符串当字典用。
-2. `id` 是本次调用的身份证。工具结果回灌时必须带上它，让模型知道这条结果是回答哪次调用的。
+1. `arguments` 是 JSON 字符串，不是对象。协议规定参数以文本传输，执行前必须使用 `json.loads` 解析，不能直接按字典读取。
+2. `id` 是本次调用的唯一标识。工具结果回传时必须带上它，使模型能够把结果与调用对应起来。
 3. `content` 是 `null`。模型请求工具时通常不说话，文字通道空着。
 
 ### 完整往返的四个阶段
@@ -95,7 +95,7 @@ chapters/02-tool-calling/src/
 ├── client.py     # 第 01 章的客户端 + 工具支持
 ├── calculator.py # 本章新增：一个安全的计算器工具
 ├── agent.py      # 本章新增：工具调用循环
-└── demo.py       # 跑一次完整往返
+└── demo.py       # 运行一次完整往返
 ```
 
 ## 2.2 工具的说明书：JSON Schema
@@ -136,7 +136,7 @@ calculator = Tool(
 
 ### 实现一个不用 `eval` 的计算器
 
-`execute` 内部怎么算表达式？新手的第一个念头是 `eval(expression)`，方便，但极其危险：`eval` 会执行任意 Python 代码，而 `expression` 是模型生成的字符串，属于不可信输入。模型一旦被诱导返回 `"__import__('os').system('rm -rf ...')"`，`eval` 会真的执行它。
+`execute` 不能直接使用 `eval(expression)`：`eval` 会执行任意 Python 代码，而 `expression` 是模型生成的不可信输入。攻击者可以诱导模型返回 Python 调用表达式，使 Agent 进程执行非预期操作。
 
 这里需要建立一个贯穿全书的安全原则：模型生成的内容属于外部输入，执行前必须校验。本章实现一个递归下降解析器，只接受数字和四则运算符，其余字符一律报错：
 
@@ -243,7 +243,7 @@ class Message:
 
 三个扩展点的作用：
 
-- `reasoning_content` 保存模型返回的思考内容。它不直接显示给用户，但属于 assistant 历史；后续请求必须按原文回传。rc.8 将这条规则统一到所有带思考的 assistant 轮次，不再只回传同时带工具调用的轮次。
+- `reasoning_content` 保存模型返回的思考内容。它不直接显示给用户，但属于 assistant 历史；后续请求必须按原文回传。当前官方实现对所有带思考内容的 assistant 轮次采用这条规则，不限于同时包含工具调用的轮次。
 - `tool_calls` 挂在 `assistant` 消息上，表示这条回复里模型请求调用这些工具。用 `tuple` 而不是 `list`，配合 `frozen=True` 的不可变性承诺，tuple 自身不可变。
 - `tool_call_id` 放在 `role="tool"` 的消息中，与 `ToolCall.id` 一一对应。把工具结果送回模型时必须标明它对应哪次调用；模型一轮可能同时请求多个工具，没有编号就无法正确配对。
 
@@ -319,7 +319,7 @@ class DeepSeekClient:
 - 返回值从 `str` 变成 `Message`。模型回复现在可能有调用无文字，只返回字符串会丢掉信息。从这里开始，客户端始终返回完整的 `Message`。
 - `tools` 清单里每个工具包一层 `{"type": "function", "function": {...}}`，这是协议要求的嵌套结构，`type` 固定为 `"function"`。
 - `reasoning_content` 单独保存模型的思考内容，下一次请求会按原文回传，不与给用户显示的 `content` 混在一起。
-- `raw_message.get("tool_calls") or []` 是兜底，普通文字回复里没有这个字段，用 `get` 加空列表避免 KeyError。
+- `raw_message.get("tool_calls") or []` 为缺少该字段的普通文字回复提供空列表，避免 `KeyError`。
 
 `_wire_message` 负责反向转换，内部 `Message` 转协议 dict，其中 `role="tool"` 的消息必须带上 `tool_call_id`：
 
@@ -452,7 +452,7 @@ uv run python chapters/02-tool-calling/src/demo.py
 
 ## 本章小结
 
-- `Tool` 与 `calculator`：工具等于给模型看的说明书加给程序跑的执行器；计算器用递归下降解析器实现，拒绝 `eval`
+- `Tool` 与 `calculator`：工具由模型侧参数说明和本地执行函数组成；计算器使用递归下降解析器，不调用 `eval`
 - `ToolCall` 与扩展后的 `Message`：思考内容回传、工具请求、`tool` 角色消息与 `tool_call_id` 对应关系
 - `DeepSeekClient.chat()` 升级：注入 `tools` 清单、解析 `tool_calls`、返回完整 `Message`
 - `run_agent()`：两个步骤组成的最小往返，以及终止条件、错误返回和多工具执行
@@ -461,10 +461,10 @@ uv run python chapters/02-tool-calling/src/demo.py
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用，并把结果送回模型；它还支持流式处理和多个步骤，第 07 章继续讲解 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `Tool` | 官方将 `ToolDefinition` 注册到 `ctx.tools`，并在执行前、执行时和执行后分别提供扩展位置 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器会逐个流式分片拼出工具调用；本章使用非流式 `chat()` 一次取得完整的 `tool_calls` |
-| [`packages/llm/llm-deepseek/src/serialize.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/serialize.ts) | `_wire_message()` | 与官方一样回传模型的空文本和 `reasoning_content`；教学版消息只包含文本，不处理图片附件 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用，并把结果送回模型；它还支持流式处理和多个步骤，第 07 章继续讲解 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/tools/README.zh.md) | `Tool` | 官方将 `ToolDefinition` 注册到 `ctx.tools`，并在执行前、执行时和执行后分别提供扩展位置 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器会逐个流式分片拼出工具调用；本章使用非流式 `chat()` 一次取得完整的 `tool_calls` |
+| [`packages/llm/llm-deepseek/src/serialize.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/llm-deepseek/src/serialize.ts) | `_wire_message()` | 与官方一样回传模型的空文本和 `reasoning_content`；教学版消息只包含文本，不处理图片附件 |
 
 ## 练习
 

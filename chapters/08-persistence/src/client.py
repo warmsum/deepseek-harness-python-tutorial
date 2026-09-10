@@ -55,7 +55,7 @@ class Tool:
 class DeepSeekClient:
     BASE_URL = "https://api.deepseek.com"
 
-    def __init__(self, api_key: str | None = None, model: str = "deepseek-chat") -> None:
+    def __init__(self, api_key: str | None = None, model: str = "deepseek-v4-flash") -> None:
         self.api_key = api_key or load_api_key()
         self.model = model
 

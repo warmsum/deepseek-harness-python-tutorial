@@ -1,4 +1,4 @@
-"""第 01 章 demo：把三种调用方式各跑一遍。
+"""第 01 章 demo：依次运行三种调用方式。
 
 运行（在项目根目录）：
     uv run python chapters/01-streaming-agent/src/demo.py
@@ -20,7 +20,7 @@ HISTORY = [
 
 
 def demo_chat() -> None:
-    """3.1 非流式：等模型全部想完，一次性打印。"""
+    """3.1 非流式：等待生成完成后一次性打印。"""
     print("=" * 60)
     print("演示 1：非流式调用（一次拿回完整回答）")
     print("=" * 60)
@@ -30,7 +30,7 @@ def demo_chat() -> None:
 
 
 async def demo_stream() -> None:
-    """3.2 流式：模型每想出一小段，立刻打印一小段。"""
+    """3.2 流式：每收到一个分片便立即打印。"""
     print()
     print("=" * 60)
     print("演示 2：流式调用（边生成边显示）")
@@ -46,7 +46,7 @@ async def demo_stream_message() -> None:
     """3.3 组装：分片只在屏幕出现，历史里只有一条完整消息。"""
     print()
     print("=" * 60)
-    print("演示 3：流式 + 组装成完整消息（Agent 的标准做法）")
+    print("演示 3：流式 + 组装成完整历史消息")
     print("=" * 60)
     client = DeepSeekClient()
     message = await client.stream_message(HISTORY)

@@ -51,9 +51,9 @@ def main() -> None:
 
     print()
     print("=== 事件日志：两个轮次边界 ===")
-    for event in agent.session.events:
+    for event in agent.session.snapshot_events():
         marker = "  ← 轮次边界" if event.type in ("turn/start", "turn/end") else ""
-        print(f"  #{event.id:<2} {event.type:<20}{marker}")
+        print(f"  #{event.seq:<2} {event.type:<20}{marker}")
 
 
 if __name__ == "__main__":

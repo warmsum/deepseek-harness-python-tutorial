@@ -35,22 +35,22 @@
 @dataclass(frozen=True)
 class SubagentResult:
     output: str
-    stop_reason: str  # "completed" / "max-steps" / "error"
+    stop_reason: str  # "completed" / "max-steps" / "interrupted" / "error"
     diagnostic: str | None = None
 
 
 def run_subagent(client, task, system_prompt, max_steps=3, session=None) -> SubagentResult:
     session = session or Session()  # 默认隔离，也可接收 fork/continuable seed
     session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": task})
 
     partial = ""
     try:
-        for _step in range(max_steps):
-            reply = client.chat(
-                [Message(role="system", content=system_prompt),
-                 *session.derive_messages()]
-            )
+        for step in range(1, max_steps + 1):
+            session.append("step/start", {"turn": 1, "step": step})
+            session.record_system_prompt(system_prompt, turn=1, step=step)
+            if step == 1:
+                session.append("user/message", {"content": task})
+            reply = client.chat(session.derive_messages())
             event = {"content": reply.content, "tool_calls": []}
             if reply.reasoning_content:
                 event["reasoning_content"] = reply.reasoning_content
@@ -73,7 +73,7 @@ def run_subagent(client, task, system_prompt, max_steps=3, session=None) -> Suba
 三个教学要点：
 
 1. 默认创建全新 `Session`。子智能体的日志只记录当前任务和自己的回复，父会话不会自动进入其中；正常完成、达到步骤上限、中断和错误等路径都会写入 `turn/end`。
-2. `SubagentResult` 把输出 `output`、停止原因 `stop_reason` 和诊断信息 `diagnostic` 分开。子智能体运行到一半失败时，已经生成的内容仍放在 `output`；模型服务或运行时错误只放在 `diagnostic`，不会伪装成子智能体的回答。
+2. `SubagentResult` 把输出 `output`、停止原因 `stop_reason` 和诊断信息 `diagnostic` 分开。当前非流式教学客户端在请求失败时通常没有可提交的输出，因此 `output` 为空，模型服务或运行时错误只放在 `diagnostic`。
 3. 异常会转换成 `stop_reason="error"` 的结果。父智能体因此能够区分正常回答、部分回答和失败原因，再决定是否重试或改用其他方案。
 
 分支会话的初始内容由一个很小的日志切片函数生成：
@@ -81,12 +81,13 @@ def run_subagent(client, task, system_prompt, max_steps=3, session=None) -> Suba
 ```python
 def fork_session(parent: Session) -> Session:
     last_turn_end = -1
-    for index, event in enumerate(parent.events):
+    events = parent.snapshot_events()
+    for index, event in enumerate(events):
         if event.type == "turn/end":
             last_turn_end = index
     if last_turn_end < 0:
         return Session()
-    return Session.from_log(parent.events[:last_turn_end + 1])
+    return Session.from_log(events[:last_turn_end + 1])
 ```
 
 父会话还没有完整轮次时返回空会话。这里复制事件值，不共享父会话对象，因此父子双方后续追加内容时互不影响。
@@ -152,7 +153,7 @@ subagent_tool = Tool(
 
 `SubagentManager` 会记录每个子智能体属于哪个根智能体。读取、列举和发送后续消息时都要核对所有者，其他根智能体不能只凭子智能体编号访问它。关闭管理器时，会先中断并回收所有子智能体。
 
-教学版没有实现子智能体的跨进程恢复、主动向父智能体报告进度、能力协商和最大委派深度。它保留了最重要的三条本地路径：一次性任务、继承已完成历史的分支任务，以及可以继续对话的子智能体。更完整的差异放在章末说明。
+教学版没有实现子智能体的跨进程恢复、父子双向消息、按标识编辑或删除排队消息、`list_agents`、能力协商和最大委派深度。它保留三条本地路径：一次性任务、继承已完成历史的分支任务，以及可以继续对话的子智能体。当前官方的可继续子智能体还支持 Queue、Steer、停止和无需加载会话的层级发现。
 
 ## 14.6 后台任务：查询、等待与取消
 
@@ -173,7 +174,7 @@ snapshot = jobs.wait(owner_id, job.id, timeout=1.0)
 
 `WorkflowEngine.parallel()` 并发运行一组无参数任务函数，结果仍保持输入顺序，单项失败时对应位置为 `None`。`pipeline()` 让每个输入依次完成自己的多个阶段，不要求所有输入完成同一阶段后才能继续，因此较快的任务无需等待较慢任务。`max_concurrency` 限制同时运行数，`max_agents` 限制一次工作流最多启动多少个子任务。
 
-教学版直接运行 Python 函数，只演示任务编排和数量限制。线程不构成安全隔离，因此不能用它执行不可信代码。官方参考版本使用 Worker Thread 执行受限 JavaScript 脚本，提供的接口和安全边界更完整。
+教学版直接运行 Python 函数，只演示任务编排和数量限制。线程不构成安全隔离，因此不能用它执行不可信代码。官方当前版本使用 Worker Thread 执行受限 JavaScript 脚本，提供的接口和隔离方式更完整。
 
 ## 14.8 运行完整示例
 
@@ -203,12 +204,12 @@ uv run python chapters/14-subagents-workflow/src/demo.py
 === ⑤ 并行执行（计时） ===
   [子 agent#1] 6  (completed)
   [子 agent#2] 14  (completed)
-  总耗时: 0.8s（若串行执行约为两倍）
+  总耗时: 0.8s
 
 === ⑥ 上下文隔离证据 ===
   [system] 你是一个速算助手，直接给出答案。…
   [user] 请计算 3+3 等于多少，并给出结果。…
-  ← 父 agent 的对话历史一个字都没进来
+  ← 子会话未自动继承父 agent 的对话历史
 
 === ⑦ 主 agent 汇总 ===
   [主 agent] 两个子任务都已完成，结果如下：
@@ -233,12 +234,12 @@ uv run python chapters/14-subagents-workflow/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool`、第 17 章的 `subagent` | 对齐模型发起委派、分开返回失败诊断与部分文本，以及前后台选择 |
-| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent/README.zh.md) | `run_subagent`、`ContinuableSubagent` | 教学版在当前进程中实现一次性和可继续对话的子智能体；没有具名外部服务和跨进程恢复 |
-| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-fork-in-process/README.zh.md) | `fork_session` | 与官方一样只继承父会话到最后一个完整轮次为止；教学版没有创建期间的能力过滤 |
-| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 官方可以把任务委派给独立的 Codex 或 Claude Code 进程；两者都使用隔离上下文完成一次性任务 |
-| [`packages/jobs/jobs-local/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/jobs/jobs-local/README.zh.md) | `LocalJobs` | 与官方一样按所有者隔离任务，并支持查询、等待和取消；教学版没有完成通知、自动过期和持久化 |
-| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/workflow/tool-workflow/README.zh.md) | `WorkflowEngine`、第 17 章的 `workflow` | 对齐批量智能体编排和数量限制；教学版使用 Python 函数，不执行官方 Worker Thread JavaScript |
+| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool`、第 17 章的 `subagent` | 对齐模型发起委派、结构化停止原因与诊断信息，以及前后台选择 |
+| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/subagent/subagent/README.zh.md) | `run_subagent`、`ContinuableSubagent` | 教学版在当前进程中实现一次性和 FIFO 可继续对话；没有父子双向消息、冷恢复和持久 Activation |
+| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/subagent/subagent-fork-in-process/README.zh.md) | `fork_session` | 与官方一样只继承父会话到最后一个完整轮次为止；教学版没有创建期间的能力过滤 |
+| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 官方可以把任务委派给独立的 Codex 或 Claude Code 进程；两者都使用隔离上下文完成一次性任务 |
+| [`packages/jobs/jobs-local/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/jobs/jobs-local/README.zh.md) | `LocalJobs` | 与官方一样按所有者隔离任务，并支持查询、等待和取消；教学版没有完成通知、自动过期和持久化 |
+| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/workflow/tool-workflow/README.zh.md) | `WorkflowEngine`、第 17 章的 `workflow` | 对齐批量智能体编排和数量限制；教学版使用 Python 函数，不执行官方 Worker Thread JavaScript |
 
 ## 练习
 

@@ -1,4 +1,4 @@
-"""第 02 章 demo：完整跑一次「模型 → 工具 → 模型」的往返。
+"""第 02 章 demo：运行一次“模型 → 工具 → 模型”往返。
 
 运行（在项目根目录）：
     uv run python chapters/02-tool-calling/src/demo.py

@@ -4,7 +4,7 @@
 本章实现它的核心三件事：
 1. `Context`      —— 插件安装的环境（容器）
 2. `PluginHandle` —— 一次安装的句柄：状态机 + 资源清单
-3. `effect`       —— 副作用的唯一入口：注册资源的同时注册它的清理方式
+3. `effect`       —— 创建资源时同步登记清理方式
 
 第 04 章在此基础上加入服务与依赖注入。
 """
@@ -21,7 +21,7 @@ PluginFn = Callable[["Context", Any], Disposer | None]
 
 
 def _once(disposer: Disposer) -> Disposer:
-    """把清理函数变成 single-shot：无论谁先调用，都只执行一次。"""
+    """包装清理函数，使其最多执行一次。"""
     active = True
 
     def run() -> None:
@@ -101,8 +101,10 @@ class PluginHandle:
         """卸载：逆序执行全部清理函数（后注册的先清理）。"""
         if self.state == "disposed":
             return
-        self._dispose_all()
-        self.state = "disposed"
+        try:
+            self._dispose_all()
+        finally:
+            self.state = "disposed"
 
     def _dispose_all(self) -> None:
         disposers = list(reversed(self._disposers))
@@ -140,10 +142,8 @@ class Context:
     def effect(self, fn: Callable[[], Disposer | None]) -> Disposer:
         """立即执行 fn，把它返回的清理函数挂到当前插件名下。
 
-        为什么需要这个入口？插件的 apply 期间会创建各种资源（监听器、
-        文件、任务），创建资源的代码和释放资源的代码往往相隔很远。
-        effect 把两者绑在一起：谁创建谁负责交出清理方式，句柄负责在
-        卸载时统一执行。
+        插件在 apply 期间创建监听器、文件或任务时，同时返回相应的清理
+        函数；句柄在卸载时统一执行这些函数。
         """
         raw_disposer = fn()
         disposer = _once(raw_disposer) if raw_disposer is not None else None
@@ -156,8 +156,7 @@ class Context:
     # ------------------------------------------------------------------
 
     def on(self, event: str, listener: Callable[..., Any]) -> Disposer:
-        """注册事件监听器。返回的解绑函数同时挂在当前插件名下——
-        插件卸载时监听器自动解绑，不会留下「幽灵监听器」。"""
+        """注册事件监听器，并把解绑函数登记到当前插件。"""
         self._listeners.setdefault(event, []).append(listener)
 
         def remove_listener() -> None:

@@ -20,3 +20,9 @@ mini-harness = "mini_harness.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chapters/17-headless-capstone/src/mini_harness"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/AGENTS.md",
+  "/LOCAL_CONTEXT.md",
+]

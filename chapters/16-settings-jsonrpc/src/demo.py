@@ -22,14 +22,14 @@ def main() -> None:
     settings = Settings(
         user_document={
             "agent": {
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "system_prompt": "你是简洁的 Python 教学助手。",
             }
         }
     )
     agent_settings = settings.register(
         "agent",
-        defaults={"model": "deepseek-chat", "system_prompt": "你是编程助手。"},
+        defaults={"model": "deepseek-v4-flash", "system_prompt": "你是编程助手。"},
         base={"language": "zh-CN"},
     )
     revision = agent_settings.revision

@@ -57,12 +57,7 @@ def todo_write(
     *,
     allow_parallel_in_progress: bool,
 ) -> str:
-    """整体替换式写入：校验通过后追加 todo/write 事件（完整快照）。
-
-    为什么「整体替换」而不是「单项增删」？模型每次调用都发送完整列表。
-    这样日志里的每个 todo/write 事件
-    都是自洽的完整快照，回放时后写覆盖先写，UI 与恢复永远拿到
-    一致状态，不会有「增删了一半」的中间态。"""
+    """校验完整列表并追加 todo/write 快照；回放时采用最后一份。"""
     errors = validate_todos(
         items, allow_parallel_in_progress=allow_parallel_in_progress
     )

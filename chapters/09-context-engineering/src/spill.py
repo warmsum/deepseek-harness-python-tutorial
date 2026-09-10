@@ -1,4 +1,4 @@
-"""第 09 章：过大纯文本工具结果的 spill seam、local provider 与策略。"""
+"""第 09 章：过大纯文本工具结果的外存接口、本地实现与策略。"""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class SpillPolicy:
         call_id: str,
         nested: bool = False,
     ) -> str:
-        """尽力 spill；保存失败、read、嵌套调用都保留原文。"""
+        """尝试外存；保存失败、read 或嵌套调用均保留原文。"""
         cap = self.max_inline_bytes
         total = len(text.encode("utf-8"))
         if (

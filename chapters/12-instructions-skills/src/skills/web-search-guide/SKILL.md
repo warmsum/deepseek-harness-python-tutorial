@@ -1,6 +1,6 @@
 ---
 name: web-search-guide
-description: 如何使用 Web Search 工具高效搜索网络、挑选来源、引用结果
+description: 如何使用 Web Search 工具搜索网络、筛选来源并引用结果
 ---
 
 # Web Search 使用指南

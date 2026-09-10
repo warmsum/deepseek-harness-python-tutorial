@@ -46,6 +46,8 @@ class Tool:
 
 
 class DeepSeekClient:
+    MODEL = "deepseek-v4-flash"
+
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or load_api_key()
 
@@ -73,7 +75,7 @@ class DeepSeekClient:
 
     def chat(self, messages: list[Message], tools: list[Tool]) -> Message:
         payload = {
-            "model": "deepseek-chat",
+            "model": self.MODEL,
             "messages": [self._wire(message) for message in messages],
             "tools": [
                 {

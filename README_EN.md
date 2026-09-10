@@ -21,7 +21,7 @@
 
 Calling a large language model once is straightforward: send a message, wait for the response, and display the text. An agent that can work on a task over time has a different set of problems to solve. How does the model call a tool? Where does conversation history live? What happens when the context approaches its limit? How are file and shell operations constrained? How does a new user message reach an agent that is already running?
 
-[DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) (DSH) provides a complete agent runtime built around these questions. Its TypeScript codebase contains many cooperating modules. A Python developer reading it for the first time must often learn the language, the project structure, and the agent mechanisms at the same time. That makes it easy to lose sight of the system itself.
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) provides a complete agent runtime built around these questions. Its TypeScript codebase contains many cooperating modules. A Python developer reading it for the first time must often learn the language, the project structure, and the agent mechanisms at the same time. That makes it easy to lose sight of the system itself.
 
 mini-harness turns the core DSH mechanisms into 17 Python chapters. The course begins with a minimal streaming model call, then adds tools, sessions, prompt assembly, persistence, context compaction, filesystem and shell access, skills, sub-agents, and web search. The final chapter assembles the main execution path into a headless agent that accepts a task, persists its session, and returns a result.
 
@@ -182,7 +182,9 @@ The course aligns with DSH behavior, data flow, and lifecycle rather than TypeSc
 
 ## Official source baseline
 
-The course checks its mechanisms and terminology against the official DeepSeek Harness source. Its reference version is commit [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534), dated 2026-08-19 and released as `0.1.0-rc.8`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
+The course checks its mechanisms and terminology against the official DeepSeek Harness source. The current reference is the prerelease [`dsh-v0.1.5-alpha.2`](https://github.com/deepseek-ai/deepseek-harness/tree/b2e3b2a0125854567a4a5fcba75782e42fe84901), published on 2026-09-09 at commit `b2e3b2a0125854567a4a5fcba75782e42fe84901`. Pinning the source keeps links and behavior descriptions reproducible. Each chapter identifies the upstream source, retained semantics, and teaching simplifications.
+
+This baseline uses Session V3: the system prompt is part of the message surface, request headers retain model configuration and tool schemas, pending Inbox messages are reconstructed from session events, and live agents are managed through `ctx.agents` while setup receives an explicit Agent. The course expresses those semantics with smaller Python data structures and does not read official session artifacts.
 
 <details>
 <summary><strong>Open the source map for all 17 chapters</strong></summary>
@@ -195,8 +197,8 @@ The course checks its mechanisms and terminology against the official DeepSeek H
 | 04 | Services, fiber context, and waterfall | `vendor/cordis/src/reflect.ts`, `vendor/cordis/src/events.ts` |
 | 05 | Event log and request envelope | `packages/core/session`, `packages/core/agent-loop/src/agent.ts` |
 | 06 | Prompt and tool registries | `packages/core/system-prompt`, `packages/core/tools` |
-| 07 | Turns, steps, and Inbox | `packages/core/agent/src/inbox.ts`, `packages/core/agent-loop/src/agent.ts` |
-| 08 | Append-only JSONL and recovery | `packages/session/session-persistence-jsonl` |
+| 07 | Turns, steps, and Inbox | `packages/core/agent-loop/src/inbox.ts`, `packages/core/agent-loop/src/agent.ts` |
+| 08 | Append-only JSONL, format generations, and recovery | `packages/session/session-persistence-jsonl`, `packages/session/session-format-v2-to-v3` |
 | 09 | Replay-aware metering and compaction | `packages/llm/token-meter`, `packages/compaction/compaction-basic` |
 | 10 | Filesystem fence and observation policy | `packages/fs/fs-sandbox`, `packages/fs/fs-observation-policy` |
 | 11 | Shell sandbox and approval | `packages/shell/bash-sandbox`, `packages/interaction/user-approval` |
@@ -228,7 +230,7 @@ mini-harness/
 
 The filesystem and shell chapters keep live model actions inside temporary workspaces. Chapter 10 uses `workspace-write` and requires the model to read, edit, and verify a file. Chapter 11 approves only the two exact commands used by the example. Paths are normalized before allowed-root checks, and command execution includes approval, timeouts, and result collection.
 
-The path fence still runs inside an ordinary Python process and does not replace an operating-system sandbox. Child processes retain the permissions of the current user. The course also leaves out the graphical interface, HTTP service, hot reload, and cloud isolation because they are outside the headless execution path covered here.
+The path fence still runs inside an ordinary Python process and does not replace an operating-system sandbox. Child processes retain the permissions of the current user. `web_fetch` ignores environment proxy settings, rejects non-public addresses, and bounds redirects, content types, and response size, but the teaching implementation neither pins the actual connection to the addresses it validated nor detects DNS64. The course also leaves out the graphical interface, HTTP service, hot reload, and cloud isolation.
 
 ## Where to go next
 
@@ -237,7 +239,7 @@ The 17 chapters leave several natural extensions:
 - connect chapter 09's model-based summary compaction to chapter 17 and recover when the model service rejects an oversized request;
 - replace chapter 14's teaching Python workflow with the official Worker Thread JavaScript engine;
 - connect an MCP client and register external services as tools;
-- implement Code Mode, collapsing many tool interfaces into one code-execution entry point;
+- implement Programmatic Tool Calling (PTC), collapsing many tool interfaces into one code-execution entry point;
 - assemble streaming tool-call argument chunks in chapter 02;
 - study the DSH Web, Host, and platform sandboxes beyond the headless path.
 

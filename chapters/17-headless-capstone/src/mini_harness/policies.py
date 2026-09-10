@@ -18,7 +18,7 @@ from .spill import LocalSpillStore, SpillPolicy
 
 
 def meter_provider(ctx: Context, _config: Any) -> None:
-    ctx.provide("meter", TokenMeter(context_window=100_000))
+    ctx.provide("meter", TokenMeter(context_window=1_000_000))
 
 
 @depends("agent_settings")
@@ -91,10 +91,7 @@ def pruner_plugin(ctx: Context, _config: Any) -> None:
             return
         result = pruner.prune_session(request.session)
         if result.replacements:
-            request.messages = [
-                Message(role="system", content=request.system_prompt),
-                *request.session.derive_messages(),
-            ]
+            request.messages = request.session.derive_messages()
 
     ctx.on("agent/prepare-request", prepare)
 

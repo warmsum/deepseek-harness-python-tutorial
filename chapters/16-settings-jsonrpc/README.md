@@ -73,7 +73,7 @@ class Settings:
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"} }
-{ "jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-chat"} }
+{ "jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-v4-flash"} }
 ```
 
 - 请求：`method` 表示要调用的方法，`params` 保存参数，`id` 是本次调用编号；响应会原样带回编号，使调用方能够对应请求与结果。
@@ -81,7 +81,7 @@ class Settings:
 
 JSON-RPC 为常见错误规定了编号：-32700 表示 JSON 解析失败，-32600 表示请求结构不合法，-32601 表示方法不存在，-32602 表示参数不合法。调用方可以根据编号分类处理，不需要分析自然语言错误文本。
 
-`RpcError` 还带一个可选的 `request_id`。彻底无法解析、无法确认请求身份时响应 id 为 null；请求结构和 id 已经有效、只是 params 类型错误时，错误响应必须原样带回该 id，调用方才能把失败对应到正确请求。
+`RpcError` 还带一个可选的 `request_id`。解析失败或请求编号类型无效时，响应 id 为 null；请求编号已经有效、只是 params 类型错误时，错误响应会原样带回该 id，调用方可以把失败对应到正确请求。教学版接受字符串、有限数字和 null 作为 id。
 
 ## 16.4 用 RpcDispatcher 解析和分发请求
 
@@ -172,18 +172,18 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 ```
 === 外部请求先读取当前配置 ===
 → {"jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"}}
-← {"jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-chat", "system_prompt": "你是简洁的 Python 教学助手，只回答一个自然段。", "language": "zh-CN"}}
+← {"jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-v4-flash", "system_prompt": "你是简洁的 Python 教学助手，只回答一个自然段。", "language": "zh-CN"}}
 
 === JSON-RPC 真实驱动模型 ===
 → {"jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": {"prompt": "用一句通俗的话解释 Python 生成器。"}}
-← {"jsonrpc": "2.0", "id": 2, "result": {"model": "deepseek-chat", "settings_revision": 1, "content": "生成器就像个“懒人列表”——它不会一次性把所有数据都算好存起来，而是按需一个接一个地“现做现卖”，这样既省内存又省时间，特别适合处理海量数据或无限序列。"}}
+← {"jsonrpc": "2.0", "id": 2, "result": {"model": "deepseek-v4-flash", "settings_revision": 1, "content": "生成器就像个“懒人列表”——它不会一次性把所有数据都算好存起来，而是按需一个接一个地“现做现卖”，这样既省内存又省时间，特别适合处理海量数据或无限序列。"}}
 
 === 非法请求仍返回结构化错误 ===
 → {"jsonrpc": "2.0", "id": 3, "method": "agent.run", "params": {}}
 ← {"jsonrpc": "2.0", "id": 3, "error": {"code": -32602, "message": "Invalid params: prompt 必须是非空字符串"}}
 ```
 
-第一条请求证明外部调用方读到的是三层配置合并后的结果。第二条请求使用其中的 `deepseek-chat` 和系统提示词完成真实模型调用，并在协议结果中带回配置版本。第三条请求缺少必要参数，分发器返回结构化错误，进程仍可继续处理后续请求。
+第一条请求证明外部调用方读到的是三层配置合并后的结果。第二条请求使用其中的 `deepseek-v4-flash` 和系统提示词完成真实模型调用，并在协议结果中带回配置版本。第三条请求缺少必要参数，分发器返回结构化错误，进程仍可继续处理后续请求。
 
 ## 本章小结
 
@@ -200,8 +200,8 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方的 Typert 接口会根据方法描述检查具名参数和返回值；教学版使用较小的 JSON-RPC 分发器讲解协议边界 |
-| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/settings/settings/README.zh.md) | `Settings` | 与官方一样使用命名空间和三层配置，返回不可修改的快照，并检查更新版本与 JSON 数据 |
+| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方的 Typert 接口会根据方法描述检查具名参数和返回值；教学版使用较小的 JSON-RPC 分发器讲解协议边界 |
+| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/settings/settings/README.zh.md) | `Settings` | 与官方一样使用命名空间和三层配置，返回不可修改的快照，并检查更新版本与 JSON 数据 |
 
 官方还支持按路径修改配置、敏感字段脱敏、按顺序异步通知观察者、可替换的写入后端、文件热重载和安全卸载；教学版不实现这些工程能力。官方使用 Typert 而不是 JSON-RPC，两端共享方法描述，并据此校验参数和返回值。教学版的手写 JSON-RPC 只保留逐行消息、错误格式和输入校验，不与 Typert 协议兼容。
 

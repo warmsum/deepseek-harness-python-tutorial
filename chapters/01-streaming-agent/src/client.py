@@ -3,7 +3,7 @@
 这一章实现三样东西：
 1. `load_api_key()`   —— 从项目根目录的 .env 读 API Key
 2. `Message`          —— 一条不可变的对话消息
-3. `DeepSeekClient`   —— 会「一次说完」(chat) 和「边想边说」(stream) 的模型客户端
+3. `DeepSeekClient`   —— 同时支持完整响应与流式响应的模型客户端
 """
 
 from __future__ import annotations
@@ -25,11 +25,7 @@ from httpx_sse import aconnect_sse
 
 
 def load_api_key() -> str:
-    """按「环境变量优先，其次 .env 文件」的顺序找 DeepSeek API Key。
-
-    为什么要两步？部署到服务器时常用环境变量；本地学习时把 Key 写在 .env 更方便，
-    而且 .env 已被 .gitignore 忽略，不会提交到 GitHub。
-    """
+    """先读取环境变量，再读取项目根目录的 .env。"""
     # 第一步：环境变量（例如终端里 export DEEPSEEK_API_KEY=...）
     from_env = os.getenv("DEEPSEEK_API_KEY")
     if from_env:
@@ -57,9 +53,8 @@ def load_api_key() -> str:
 class Message:
     """一条对话消息。
 
-    `frozen=True` 表示创建后不能修改。为什么 Agent 的消息要不可变？
-    因为对话历史会被反复读取（每一轮都要发给模型），任何一处代码悄悄改了
-    历史内容，后面的行为就全都对不上了。先堵住这个口子，后面会反复受益。
+    `frozen=True` 表示创建后不能修改。对话历史会被反复读取并发送给模型；
+    不可变消息可以防止后续代码意外改写已经记录的内容。
     """
 
     role: str  # "system"（规则）/"user"（用户）/"assistant"（模型）
@@ -67,7 +62,7 @@ class Message:
 
 
 # ---------------------------------------------------------------------------
-# 3. 模型客户端：一次说完 vs 边想边说
+# 3. 模型客户端：完整响应与流式响应
 # ---------------------------------------------------------------------------
 
 
@@ -75,7 +70,7 @@ class DeepSeekClient:
     """基于 httpx 与 httpx-sse 的 DeepSeek OpenAI 兼容客户端。"""
 
     BASE_URL = "https://api.deepseek.com"
-    MODEL = "deepseek-chat"
+    MODEL = "deepseek-v4-flash"
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or load_api_key()
@@ -83,10 +78,7 @@ class DeepSeekClient:
     # ---------- 3.1 非流式：一次拿回完整回答 ----------
 
     def chat(self, messages: list[Message]) -> str:
-        """把整段对话发给模型，等它全部想完，一次性拿回完整回答。
-
-        最简单、最适合起步的调用方式。缺点：长回答要等很久才看到第一个字。
-        """
+        """把整段对话发给模型，并在生成结束后返回完整回答。"""
         with httpx.Client(timeout=60) as client:
             response = client.post(
                 f"{self.BASE_URL}/chat/completions",
@@ -107,7 +99,7 @@ class DeepSeekClient:
     # ---------- 3.2 流式：边生成边产出 ----------
 
     async def stream(self, messages: list[Message]) -> AsyncIterator[str]:
-        """流式调用：模型每想出一小段，就立即交出一小段（chunk）。
+        """流式调用：模型每生成一小段，就立即交出一个分片（chunk）。
 
         这是一个「异步生成器」——调用方用 `async for` 遍历它，
         每迭代一次拿到一小段新文字，调用方立刻打印到终端。
@@ -130,10 +122,11 @@ class DeepSeekClient:
                     "stream": True,  # 关键开关：True = 边生成边给
                 },
             ) as event_source:
+                event_source.response.raise_for_status()
                 async for event in event_source.aiter_sse():
                     if event.data == "[DONE]":
                         completed = True
-                        break  # DeepSeek 用这一行表示「全部说完了」
+                        break  # DeepSeek 用这一行表示响应正常结束
                     payload = json.loads(event.data)
                     delta = payload["choices"][0].get("delta", {})
                     piece = delta.get("content")
@@ -145,13 +138,7 @@ class DeepSeekClient:
     # ---------- 3.3 组装：把分片拼成一条完整消息 ----------
 
     async def stream_message(self, messages: list[Message]) -> Message:
-        """流式调用的「正确收尾」：分片只在屏幕上显示，历史里只存完整消息。
-
-        为什么需要这一步？如果每来一个字就往对话历史里塞一条，
-        下次请求会带着几十条碎消息；中途断网时，历史里还会留下半句话。
-        所以 Agent 的规矩是：分片实时展示没问题，但进历史的必须是一条
-        完整、不可变的 Message。
-        """
+        """流式展示分片，并在正常结束后生成一条完整的历史消息。"""
         pieces: list[str] = []
         async for piece in self.stream(messages):
             pieces.append(piece)

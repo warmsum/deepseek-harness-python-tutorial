@@ -1,4 +1,4 @@
-"""第 17 章 demo：组装后的 mini_harness 跑一个完整任务。
+"""第 17 章 demo：使用组装后的 mini_harness 运行完整任务。
 
 运行（在项目根目录，需要 .env）：
     uv run python chapters/17-headless-capstone/src/demo.py
@@ -53,7 +53,10 @@ def main() -> None:
         from mini_harness.persistence import JsonlStore
 
         loaded = JsonlStore(session_file).load()
-        print(f"  读回 {len(loaded.events)} 条事件（第 08 章的持久化在工作）")
+        print(
+            f"  读回 {len(loaded.snapshot_events())} 条事件"
+            "（第 08 章的持久化在工作）"
+        )
 
 
 if __name__ == "__main__":

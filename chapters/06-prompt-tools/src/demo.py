@@ -1,4 +1,4 @@
-"""第 06 章 demo：组装请求 envelope，然后跑一遍真实对话。
+"""第 06 章 demo：组装完整请求，然后运行真实对话。
 
 运行（在项目根目录，需要 .env）：
     uv run python chapters/06-prompt-tools/src/demo.py
@@ -6,7 +6,7 @@
 输出三节：
 ① 组装出的系统提示词（两段拼接 + 变量替换）
 ② 注册表投影出的工具说明书（不含 execute）
-③ 真实跑一遍：模型用 calculator 回答问题
+③ 运行真实请求：模型用 calculator 回答问题
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def main() -> None:
     print("  ← 注意：只有 name/description/parameters，没有 execute")
 
     print()
-    print("=== ③ 真实跑一遍 ===")
+    print("=== ③ 运行真实请求 ===")
     client = DeepSeekClient()
     session = run_agent(
         client,

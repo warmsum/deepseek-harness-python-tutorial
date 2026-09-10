@@ -1,23 +1,22 @@
-"""第 09 章：上下文压缩 —— 长会话的护身符。
+"""第 09 章：长会话的上下文压缩。
 
-对应官方 packages/compaction/compaction-basic（官方最精妙的设计之一）。
-教学版保留完整策略骨架：
+对应官方 packages/compaction/compaction-basic。教学版保留以下流程：
 1. should_compact —— 压力 >= floor(contextWindow × 0.8)
 2. summarize    —— 重放「system + 被压缩区」给同一个 LLM + 官方压缩指令
-3. replace      —— 用 <compacted-summary> 替换被压缩区（替换而非追加！）
+3. replace      —— 用 <compacted-summary> 替换被压缩区
 4. 失败处理      —— 摘要不缩小 → 重试 → 仍不行 → 保留原文继续
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from client import DeepSeekClient, Message
 from meter import TokenMeter, estimate_message
 
-# 压缩指令：逐字复刻官方 COMPACTION_INSTRUCTION
-# （packages/compaction/compaction-basic/README.zh.md 中的英文原文）
+# 固定基线中的官方 COMPACTION_INSTRUCTION
 COMPACTION_INSTRUCTION = """You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.
 
 Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.
@@ -53,7 +52,7 @@ Rules:
 - Output only the checkpoint text: do not call any tool or take any other action.
 - If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure."""
 
-# checkpoint 开场白：逐字复刻官方 CHECKPOINT_PREAMBLE
+# 固定基线中的官方 CHECKPOINT_PREAMBLE
 CHECKPOINT_PREAMBLE = (
     "This is an automatically generated checkpoint condensing an earlier span of the "
     "conversation to free up context. Treat the captured context as established "
@@ -89,9 +88,11 @@ def should_compact(
 def select_shadowed_start(
     meter: TokenMeter, messages: list[Message], retain_ratio: float = 0.16
 ) -> int:
-    """从尾部向前累积 token，凑够保留预算（默认 16% contextWindow），
+    """从尾部向前累积 token，达到保留预算（默认 16% contextWindow）后，
     之前的消息是被压缩区。返回被压缩区结束的下标（即保留区起点）。
     返回 -1 表示无可压缩区（整个历史都在保留预算内）。"""
+    _require_system_head(messages)
+    _require_ratio("retain_ratio", retain_ratio)
     retain_tokens = int(meter.context_window * retain_ratio)
     accumulated = 0
     tail_start = len(messages)
@@ -108,9 +109,11 @@ def build_summary_prompt(messages: list[Message], tail_start: int) -> list[Messa
     """构造压缩调用的输入：system 原文 + 被压缩区原文（逐字重放），
     末尾追加压缩指令作为最后一条 user 消息。
 
-    KV cache 复用的来源：这个重放与「下一次真实请求」的前缀逐字节
-    一致——provider 的前缀缓存直接命中，只有末尾的指令和摘要输出
-    是未缓存的。"""
+    重放内容与正常请求保持相同前缀，为模型服务复用 KV cache 提供条件；
+    是否命中仍由模型服务决定。"""
+    _require_system_head(messages)
+    if not isinstance(tail_start, int) or isinstance(tail_start, bool) or not 1 < tail_start <= len(messages):
+        raise ValueError("tail_start 必须位于可压缩消息区间内")
     return [
         messages[0],  # system：原样重放
         *messages[1:tail_start],  # 被压缩区逐字重放
@@ -132,9 +135,10 @@ def build_checkpoint_message(summary: str) -> Message:
 def replace(
     messages: list[Message], tail_start: int, checkpoint: Message
 ) -> list[Message]:
-    """用 checkpoint 替换被压缩区 [1..tail_start)。
-    替换而非追加——追加只会让未来的输入更长，替换才真正缩短上下文
-    （官方 README.zh.md：替换减少未来输入历史而非追加第二份）。"""
+    """用 checkpoint 替换被压缩区 [1..tail_start)，缩短后续模型输入。"""
+    _require_system_head(messages)
+    if not isinstance(tail_start, int) or isinstance(tail_start, bool) or not 1 < tail_start <= len(messages):
+        raise ValueError("tail_start 必须位于可压缩消息区间内")
     return [messages[0], checkpoint, *messages[tail_start:]]
 
 
@@ -146,9 +150,14 @@ def compact(
     retain_ratio: float = 0.16,
     retries: int = 1,
 ) -> CompactResult:
-    """压缩主流程（对应官方 compactIfNeeded）：
-    压力超阈值 → 选范围 → 压缩调用 → 缩小校验 → 替换 → 复测；
-    失败路径：摘要不缩小拒绝重试，重试用尽保留原文继续。"""
+    """超过阈值时选择旧历史、生成摘要、校验缩小幅度并替换。"""
+    _require_system_head(messages)
+    _require_ratio("threshold_ratio", threshold_ratio)
+    _require_ratio("retain_ratio", retain_ratio)
+    if retain_ratio >= threshold_ratio:
+        raise ValueError("retain_ratio 必须小于 threshold_ratio")
+    if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+        raise ValueError("retries 必须是非负整数")
     threshold_tokens = int(meter.context_window * threshold_ratio)
     current = messages
     last_good: CompactResult | None = None
@@ -210,7 +219,7 @@ def compact(
             shadowed_count=last_good.shadowed_count,
             shadowed_tokens=last_good.shadowed_tokens,
             checkpoint_tokens=last_good.checkpoint_tokens,
-            attempts=last_good.attempts,
+            attempts=attempts,
             reason="替换后仍超阈值，保留已替换结果继续",
         )
     return CompactResult(
@@ -222,3 +231,18 @@ def compact(
         attempts=attempts,
         reason="摘要未缩小或无可压缩区，保留原文继续",
     )
+
+
+def _require_system_head(messages: list[Message]) -> None:
+    if not messages or messages[0].role != "system":
+        raise ValueError("压缩输入必须以 system 消息开头")
+
+
+def _require_ratio(name: str, value: float) -> None:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or not 0 < value <= 1
+    ):
+        raise ValueError(f"{name} 必须位于 (0, 1] 区间")

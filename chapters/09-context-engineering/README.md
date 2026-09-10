@@ -30,23 +30,33 @@
 
 智能体每轮都会追加历史，因此上下文压力会持续增加。本章把 80% 设为处理阈值：每次请求前先估算当前用量，达到阈值后再裁剪或压缩，尽量不要等到模型服务直接拒绝请求。
 
-程序在请求发出前通常拿不到服务商计算的精确 token 数，而且不同模型使用的分词方法也可能不同。本章采用一个简单估算：每 4 个字符算作 1 个 token，再加上消息角色、内容块和工具说明等结构开销。它会低估中文和大型 JSON 数据，但这里的目的只是提前判断用量是否正在接近上限，而不是计算精确账单。
+程序在请求发出前通常拿不到服务商计算的精确 token 数，而且不同模型使用的分词方法也可能不同。本章采用一个简单估算：每 4 个字符算作 1 个 token，再加上消息角色、内容块和工具说明等结构开销。它会低估中文和大型 JSON 数据，用于提前判断用量是否正在接近上限，不用于计算精确账单。
 
 ## 9.2 用 TokenMeter 估算输入长度
 
 ```python
 CHARS_PER_TOKEN = 4
 ROLE_OVERHEAD = 4
+BLOCK_OVERHEAD = 4
 
 def estimate_tokens(text: str) -> int:
     return -(-len(text) // CHARS_PER_TOKEN)  # 向上取整
 
 def estimate_message(message: Message) -> int:
     content = message.content or ""
-    return estimate_tokens(content) + ROLE_OVERHEAD
+    if message.role == "system":
+        return 0 if not content else estimate_tokens(content) + ROLE_OVERHEAD
+    tokens = ROLE_OVERHEAD
+    if content:
+        tokens += estimate_tokens(content) + BLOCK_OVERHEAD
+    if message.reasoning_content:
+        tokens += estimate_tokens(message.reasoning_content) + BLOCK_OVERHEAD
+    for call in message.tool_calls:
+        tokens += estimate_tokens(call.name) + estimate_tokens(call.arguments) + BLOCK_OVERHEAD
+    return tokens
 ```
 
-`CHARS_PER_TOKEN = 4` 表示每 4 个字符估算为 1 个 token。`-(-len // 4)` 是整数向上取整的写法，等价于 `math.ceil(len / 4)`。`ROLE_OVERHEAD = 4` 则为每条消息额外计算角色等结构信息的开销。
+`CHARS_PER_TOKEN = 4` 表示每 4 个字符估算为 1 个 token。`-(-len // 4)` 是整数向上取整的写法，等价于 `math.ceil(len / 4)`。普通消息还会计算角色和内容块开销；思考内容以及工具调用的名称和参数也计入总量。空系统提示词不产生消息，因此计为 0。
 
 工具清单也会占用输入空间，因为每次请求都要把工具名称、用途和参数结构交给模型：
 
@@ -129,7 +139,7 @@ flowchart LR
 
 本章使用的处理阈值是 80%，压缩后保留最近 16% 的原始内容。这两个比例与参考版本的官方默认配置一致。
 
-## 9.6 压缩调用：让模型总结自己
+## 9.6 压缩调用：使用模型生成摘要
 
 历史摘要仍由模型生成。DeepSeek Harness 将压缩设计成一次特殊的模型调用：
 
@@ -209,31 +219,31 @@ uv run python chapters/09-context-engineering/src/demo.py
   落盘内容完整: True
 
 === ③ 长会话逐轮计量：压力爬升 ===
-  [ 3 条]   9.4%
-  [ 6 条]  27.7%
-  [ 9 条]  37.4%
-  [12 条]  54.7%
-  [15 条]  63.9%
-  [18 条]  81.5%  ← 越过 80% 阈值！
-  [19 条]  81.8%  ← 越过 80% 阈值！
-  [20 条]  91.3%  ← 越过 80% 阈值！
-  [21 条]  91.5%  ← 越过 80% 阈值！
-  [22 条]  99.9%  ← 越过 80% 阈值！
-  [23 条] 100.0%  ← 越过 80% 阈值！
-  [24 条] 108.3%  ← 越过 80% 阈值！
+  [ 3 条]   9.7%
+  [ 6 条]  28.3%
+  [ 9 条]  38.3%
+  [12 条]  55.9%
+  [15 条]  65.4%
+  [18 条]  83.3%  ← 达到 80% 阈值
+  [19 条]  83.7%  ← 达到 80% 阈值
+  [20 条]  93.3%  ← 达到 80% 阈值
+  [21 条]  93.7%  ← 达到 80% 阈值
+  [22 条] 102.0%  ← 达到 80% 阈值
+  [23 条] 102.4%  ← 达到 80% 阈值
+  [24 条] 110.8%  ← 达到 80% 阈值
   阈值 = 3200 token（4000 × 0.8）
 
 === ④ 触发压缩：真实模型重放前缀 + 官方压缩指令 ===
-  压缩前：25 条消息，4334 token
+  压缩前：25 条消息，4430 token
 
 === ⑤ 压缩结果 ===
   ok: True（压力降到阈值以下，压缩收敛）
-  被压缩区：21 条消息，3652 token
-  checkpoint：856 token（含 preamble 与标签）
+  被压缩区：21 条消息，3736 token
+  checkpoint：860 token（含 preamble 与标签）
   压缩调用次数：1
   消息数：25 → 5
-  token：4334 → 1538
-  占用率：108.3% → 38.5%
+  token：4430 → 1554
+  占用率：110.8% → 38.9%
 
 === ⑥ checkpoint 的真实内容（模型生成） ===
   [role=user]
@@ -245,7 +255,7 @@ uv run python chapters/09-context-engineering/src/demo.py
   - User is building a GRPO training system ...
 ```
 
-前两节分别证明结果裁剪不会覆盖原日志，外部存储也不会丢失完整结果。后四节将 25 条消息压缩为 5 条，估算 token 从 4334 降到 1538，占用率从 108.3% 降到 38.5%。输出末尾展示了摘要正文，其中保留了任务意图、技术要点和下一步等结构化信息。
+前两节分别证明结果裁剪不会覆盖原日志，外部存储也不会丢失完整结果。后四节的代表性运行将 25 条消息压缩为 5 条，估算 token 从 4430 降到 1554，占用率从 110.8% 降到 38.9%。摘要正文保留任务意图、技术要点和下一步等结构化信息；具体数字会随模型生成的摘要长度变化。
 
 ## 本章小结
 
@@ -261,11 +271,11 @@ uv run python chapters/09-context-engineering/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版使用每 4 个字符约等于 1 个 token 的估算；官方还能使用模型服务返回的真实用量，并跟踪下一次请求的预计长度 |
+| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版使用每 4 个字符约等于 1 个 token 的估算；官方还能使用模型服务返回的真实用量，并跟踪下一次请求的预计长度 |
 | 同上 | 职责分离 | 官方计量器不决定使用哪个模型或何时压缩，超过阈值后的处理由调用方选择 |
-| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-basic/README.zh.md) | `compact` | 与官方一样使用 0.8 和 0.16 两个比例，检查摘要是否真正缩短，失败时保留原文；官方还会处理 KV 缓存重放 |
-| [`packages/compaction/compaction-tool-result-pruner/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-tool-result-pruner/README.zh.md) | `ToolResultPruner` | 与官方一样通过追加替换事件改变模型看到的内容，保留结果首尾并指向完整来源；教学版只处理纯文本 |
-| [`packages/spill/spill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/spill/spill/README.zh.md) | `SpillPolicy`、`LocalSpillStore` | 与官方一样按字节限制结果大小，通过可替换的存储服务返回读取位置，保存失败时保留原文；教学版只实现本地文本文件 |
+| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/compaction/compaction-basic/README.zh.md) | `compact` | 与官方一样使用 0.8 和 0.16 两个比例，检查摘要是否真正缩短，失败时保留原文；官方还会处理 KV 缓存重放 |
+| [`packages/compaction/compaction-tool-result-pruner/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/compaction/compaction-tool-result-pruner/README.zh.md) | `ToolResultPruner` | 与官方一样通过追加替换事件改变模型看到的内容，保留结果首尾并指向完整来源；教学版只处理纯文本 |
+| [`packages/spill/spill/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/spill/spill/README.zh.md) | `SpillPolicy`、`LocalSpillStore` | 与官方一样按字节限制结果大小，通过可替换的存储服务返回读取位置，保存失败时保留原文；教学版只实现本地文本文件 |
 
 ## 练习
 

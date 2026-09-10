@@ -6,7 +6,7 @@
 
 cordis 使用“依赖注入”解决这个问题。插件先声明自己需要哪些能力，这些可以被其他插件使用的能力称为服务。运行环境负责查找服务：所需服务尚未出现时，插件先等待；服务准备好后，插件再启动。本章将实现并验证三个行为：
 
-1. 服务后到，插件自动醒来；
+1. 服务后到，等待中的插件自动启动；
 2. 提供者被卸载，依赖方自动卸载；
 3. 使用服务前必须声明依赖，未声明时程序直接报错。
 
@@ -42,7 +42,7 @@ def plugin_b(ctx, _config):
 2. 无法卸载。A 被卸载后，`llm_client` 该不该清空？B 还指着它呢。
 3. 无法替换。测试时如果要给 B 换成模拟模型，只能修改共享的全局变量，也会影响其他使用者。
 
-依赖注入把“寻找服务”和“使用服务”分开。B 不主动寻找 A，只声明自己需要名为 `llm` 的服务；运行环境在服务就绪后启动 B，并把服务交给它。B 不需要知道服务由哪个插件提供，也不需要依赖固定的安装顺序。若要更换实现，先卸载旧的提供者，再注册新的提供者；同名服务不会被悄悄覆盖。
+依赖注入把“寻找服务”和“使用服务”分开。B 不主动寻找 A，只声明自己需要名为 `llm` 的服务；运行环境在服务就绪后启动 B，并把服务交给它。B 不需要知道服务由哪个插件提供，也不需要依赖固定的安装顺序。若要更换实现，先卸载旧的提供者，再注册新的提供者；重复注册同名服务会直接报错。
 
 为什么读取服务前也要检查声明？如果任何插件都能随意取得任何服务，真实的依赖关系就会散落在各处。卸载一个服务时，运行环境无法判断哪些插件会受到影响。强制声明以后，每个插件依赖什么都有明确记录，环境才能正确安排启动和卸载。
 
@@ -64,15 +64,20 @@ class Context:
         provider_uid = self._current.uid if self._current is not None else 0
         registration = (value, provider_uid, self._version)
         self._services[name] = registration
-        self._notify()
 
         def unregister() -> None:
             if self._services.get(name) is registration:
                 del self._services[name]
                 self._notify()
 
+        unregister = _once(unregister)
         if self._current is not None:
             self._current.collect(unregister)
+        try:
+            self._notify()
+        except Exception:
+            unregister()
+            raise
         return unregister
 
     def get(self, name: str) -> object | None:
@@ -85,7 +90,7 @@ class Context:
 - `provider_uid` 是谁提供的。第 03 章给每个句柄发过全局唯一的 uid。
 - `version` 是第几次 provide。每次 `provide` 递增，同名服务被重新提供时 version 变化，依赖方据此知道自己手里的服务过期了。
 
-`provide` 会把经过一次性包装的注销函数登记到当前插件名下。提供者被卸载时，服务也随之注销。注册时若名称已经存在会立即报错，调用方必须先卸载旧的提供者；注销时还会检查服务表里仍是自己的那条记录，避免误删后来注册的服务。
+`provide` 会把经过一次性包装的注销函数登记到当前插件名下。提供者被卸载时，服务也随之注销。注册时若名称已经存在会立即报错，调用方必须先卸载旧的提供者；注销时还会检查服务表里仍是自己的那条记录，避免误删后来注册的服务。依赖方启动失败时，新服务也会回滚，不会留下缺少所有者的注册项。
 
 `_notify()` 遍历全部句柄重算依赖，是整套机制的中枢：
 
@@ -187,7 +192,7 @@ Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。�
 2. 声明过但没就绪，报已声明依赖但尚未就绪，插件在 pending 期间误读服务时，这个错误能立刻指出问题所在；
 3. 根本没声明，报必须先 inject，即使服务明明存在。
 
-第三种情况说明“先声明再使用”不是一条需要开发者自觉遵守的约定，而是程序会主动检查的规则。示例中，`llm` 服务虽然已经存在，未声明依赖的代码仍然无法读取它。
+第三种情况说明程序会主动检查“先声明再使用”这条规则。示例中，`llm` 服务虽然已经存在，未声明依赖的代码仍然无法读取它。
 
 事件回调在插件安装结束后仍可能读取服务，因此每个插件获得的 `Context` 视图会记住自己的身份。回调再次访问 `ctx.llm` 时，仍会使用该插件的 `inject` 声明和依赖快照，而不是依赖仅在安装期间有效的 `_current` 字段。
 
@@ -229,10 +234,10 @@ flowchart LR
 2. 监听器调用 `next()` 才会继续执行；不调用就能阻止这次操作，权限插件可以利用这一点拒绝越权请求。
 3. `next()` 不带参数时继续传递原参数，带参数时则把修改后的参数交给下一层。
 
-典型用法，一个超时策略插件，给所有工具执行加上日志，不改核心一行：
+下面的日志策略为所有工具执行记录开始和结束信息，不修改核心执行器：
 
 ```python
-def timeout_policy(c: Context, _config) -> None:
+def logging_policy(c: Context, _config) -> None:
     def wrap(exec_: dict, next_: object) -> str:
         print(f"开始执行工具 {exec_['name']}")
         result = next_()
@@ -265,33 +270,33 @@ uv run python chapters/04-services-scopes/src/demo.py
 完整输出，本地确定性运行：
 
 ```
-=== 时刻 1：服务后到，插件自动醒来 ===
+=== 场景 1：服务后到，插件自动启动 ===
   [llm-provider] 已提供 llm 服务
-  [agent] 当前状态: pending   ← 依赖不齐，安静等待
-  [agent] 启动！llm={'provider': 'deepseek', 'model': 'deepseek-chat'} tools={'calculator': 'safe-eval'}
+  [agent] 当前状态: pending   ← 等待缺失依赖
+  [agent] 启动！llm={'provider': 'deepseek-official', 'model': 'deepseek-v4-flash'} tools={'calculator': 'recursive-descent'}
   [tools-provider] 已提供 tools 服务
   [agent] 当前状态: active      ← 依赖齐了，自动启动！
 
-=== 时刻 2：提供者被卸载，依赖方自动卸载 ===
+=== 场景 2：提供者被卸载，依赖方自动卸载 ===
   重名服务被拒绝: 服务 "tools" 已被注册
   卸载 tools v1 后 [agent] 状态: pending
-  [agent] 启动！llm={'provider': 'deepseek', 'model': 'deepseek-chat'} tools={'calculator': 'v2'}
+  [agent] 启动！llm={'provider': 'deepseek-official', 'model': 'deepseek-v4-flash'} tools={'calculator': 'v2'}
   [tools-provider-2] 已提供 tools v2
   注册 tools v2 后 [agent] 状态: active
   卸载 tools v2 后 [agent] 状态: pending   ← 级联卸载
 
-=== 时刻 3：读服务必须 inject ===
+=== 场景 3：读服务必须 inject ===
   报错: 读取服务 "llm" 前必须在 inject 里声明
-  ← 依赖显式化不是约定，是语法
+  ← 未声明的服务访问被运行时拒绝
 
-=== 时刻 4：waterfall 瀑布 ===
-  [timeout-policy] 开始执行工具 calculator
+=== 场景 4：waterfall 顺序处理链 ===
+  [logging-policy] 开始执行工具 calculator
   [core] 真正执行 calculator……
-  [timeout-policy] 工具 calculator 完成
+  [logging-policy] 工具 calculator 完成
   最终结果: 计算结果: 42
 ```
 
-时刻 2 中，v2 不能直接覆盖 v1。先卸载 v1 后，agent 回到 `pending`；随后注册 v2，新的提供者编号和版本改变了依赖签名，agent 才使用新服务重新启动。这样，每个服务始终有明确的所有者，卸载旧提供者时也不会误删新服务。
+场景 2 中，v2 不能直接覆盖 v1。先卸载 v1 后，agent 回到 `pending`；随后注册 v2，新的提供者编号和版本改变了依赖签名，agent 才使用新服务重新启动。这样，每个服务始终有明确的所有者，卸载旧提供者时也不会误删新服务。
 
 ## 本章小结
 
@@ -310,10 +315,10 @@ uv run python chapters/04-services-scopes/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方只通知名称和作用域受到影响的插件任务；教学版同样拒绝重名并记录所有者，但会重新检查全部依赖 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/fiber.ts) | `_recheck` | 官方在 `fiber.ts` 中解析依赖并比较依赖版本；教学版用签名变化表达同一判断 |
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/context.ts) | `Context` 视图与 `__getattr__` | 官方使用 `Proxy` 保留访问服务的插件身份；Python 版使用所有者视图达到相同目的 |
-| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/events.ts) | `waterfall` | 官方与教学版都让监听器按注册顺序包裹内层执行器 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方只通知名称和作用域受到影响的插件任务；教学版同样拒绝重名并记录所有者，但会重新检查全部依赖 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/fiber.ts) | `_recheck` | 官方在 `fiber.ts` 中解析依赖并比较依赖版本；教学版用签名变化表达同一判断 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/context.ts) | `Context` 视图与 `__getattr__` | 官方使用 `Proxy` 保留访问服务的插件身份；Python 版使用所有者视图达到相同目的 |
+| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/vendor/cordis/src/events.ts) | `waterfall` | 官方与教学版都让监听器按注册顺序包裹内层执行器 |
 
 ## 练习
 

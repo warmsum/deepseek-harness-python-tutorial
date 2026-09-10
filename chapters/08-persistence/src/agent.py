@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from checkpoint import CheckpointPolicy
-from client import DeepSeekClient, Message, Tool
+from client import DeepSeekClient, Tool
 from persistence import JsonlStore
 from session import Session
 
@@ -22,25 +22,39 @@ def run_agent(
     session = Session()
     checkpoint = CheckpointPolicy(store.save)
     session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": user_prompt})
 
     for step in range(1, max_steps + 1):
         if step > 1:
             checkpoint.before_step(session)
         session.append("step/start", {"turn": 1, "step": step})
-        messages = [
-            Message(
-                role="system",
-                content="你是计算助手。算术必须调用 calculator，不要自行心算。",
-            ),
-            *session.derive_messages(),
-        ]
-        session.append(
-            "request/header",
-            {"model": client.model, "tools": [tool.name], "step": step},
+        session.record_system_prompt(
+            "你是计算助手。算术必须调用 calculator，不要自行心算。",
+            turn=1,
+            step=step,
         )
+        if step == 1:
+            session.append("user/message", {"content": user_prompt})
+            session.append(
+                "request/header",
+                {
+                    "header": {
+                        "config": {
+                            "provider": "deepseek-official",
+                            "model": client.model,
+                        },
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.parameters,
+                            }
+                        ],
+                    },
+                    "reason": "initial",
+                },
+            )
         checkpoint.before_model(session)
-        reply = client.chat(messages, [tool])
+        reply = client.chat(session.derive_messages(), [tool])
         session.append(
             "assistant/message",
             {

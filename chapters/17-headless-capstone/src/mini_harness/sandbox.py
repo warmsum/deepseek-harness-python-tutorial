@@ -1,8 +1,8 @@
 """第 10 章：沙箱围栏 —— 文件写入的边界。
 
 对应官方 packages/fs/fs-sandbox。
-核心概念：三模式沙箱只约束「文件写效应」——读永远放行，
-写必须落在可写根目录（工作区根 + 临时目录）内。
+三种模式只约束文件写入；策略本身不限制读取。受限模式要求写入目标
+位于可写根目录（工作区根和临时目录）内。
 """
 
 from __future__ import annotations
@@ -56,10 +56,8 @@ class SandboxPolicy:
     def fence_write(self, target: Path) -> Path:
         """写前围栏：目标规范化后必须位于某个可写根之下，否则拒绝。
 
-        规范化（resolve）是核心——攻击路径 `workspace/../etc/passwd`
-        在词法上逃出工作区，resolve 后无处遁形。
-        诚实边界：这是「约束」而非「安全边界」。第 11 章会解释
-        官方 shell 沙箱如何用内核级机制隔离文件影响。"""
+        `resolve()` 会识别 `workspace/../etc/passwd` 和指向工作区外的
+        符号链接。该检查约束可信 Python 文件工具，不提供内核级隔离。"""
         if self.mode == DANGER_FULL_ACCESS:
             return target
         if self.mode == READ_ONLY:

@@ -1,4 +1,4 @@
-"""第 02 章：工具调用循环 —— Agent 的核心骨架。
+"""第 02 章：工具调用循环 —— DeepSeek Harness Agent Loop 的最小骨架。
 
 流程（这也是官方 Harness Agent Loop 的最简形态）：
     请求模型 → 模型要调用工具？→ 执行工具 → 结果回灌 → 再请求 → 模型作答 → 结束
@@ -18,11 +18,11 @@ def run_agent(
     user_prompt: str,
     max_steps: int = 10,
 ) -> list[Message]:
-    """跑一轮带工具调用的对话，返回完整历史（最后一条是模型的最终回答）。
+    """运行一轮带工具调用的对话，返回包含最终回答的完整历史。
 
-    终止条件（教学版只保留最核心的两条）：
+    教学版包含两条终止条件：
     1. 模型不再请求工具 —— 任务完成，返回历史；
-    2. 达到 max_steps —— 安全阀，防止模型陷入「永远要调工具」的死循环。
+    2. 达到 max_steps —— 停止循环并报告未在限定步骤内完成。
     """
     tools_by_name = {tool.name: tool for tool in tools}
     history: list[Message] = [

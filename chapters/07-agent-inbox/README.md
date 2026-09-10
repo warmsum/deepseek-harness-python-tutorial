@@ -7,14 +7,14 @@
 1. 新消息在智能体忙碌时到达，该怎么排队、何时生效？
 2. 一次任务中，哪些操作属于同一轮，哪些属于不同步骤？
 
-为此，智能体会维护一个收件箱 `Inbox`，其中有两条消息队列：一条等待下一轮处理，另一条在当前轮的下一步生效。模型请求还可能遇到限流、超时或临时服务错误，因此本章也会加入次数有限的自动重试。
+为此，智能体会维护一个收件箱 `Inbox`，其中有两条消息队列：一条等待下一轮处理，另一条在当前轮的下一步生效。队列的每次插入和领取都会写入 Session，使尚未处理的消息也可以恢复。模型请求还可能遇到限流、超时或临时服务错误，因此本章也会加入次数有限的自动重试。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
 - 准确区分 turn（轮次）与 step（步骤）；
-- 使用 `Inbox` 的“下一轮”和“下一步”队列安排消息；
+- 使用 Session 事件保存 `Inbox` 的“下一轮”和“下一步”队列；
 - 让同一个智能体连续处理多轮输入并保留会话历史；
 - 说明后续问题 `followup` 与中途引导 `steer` 的生效时机为什么不同；
 - 对可以恢复的模型错误进行有限重试，并记录每次等待和重试。
@@ -39,34 +39,29 @@
 
 ```python
 class Inbox:
-    def __init__(self) -> None:
-        self._next_turn: deque[Message] = deque()  # 下一轮
-        self._next_step: deque[Message] = deque()  # 下一步
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._state()  # 立即校验已有 splice 事件
 
     def followup(self, message: Message) -> None:
-        self._next_turn.append(message)
+        self._insert("next-turn", message)
 
     def steer(self, message: Message) -> None:
-        self._next_step.append(message)
+        self._insert("next-step", message)
 
     def claim_turn(self) -> list[Message]:
-        claimed = list(self._next_step)
-        self._next_step.clear()
-        if self._next_turn:
-            claimed.append(self._next_turn.popleft())
-        return claimed
-
-    def claim_step(self) -> list[Message]:
-        claimed = list(self._next_step)
-        self._next_step.clear()
+        state = self._state()
+        claimed = list(state["next-step"])
+        # 领取也追加 agent/inbox/spliced，删除已领取项
+        ...
         return claimed
 ```
 
 三个细节：
 
-- `deque` 是标准库的双端队列，`popleft` 从头取，FIFO 顺序保证先到先处理。
-- `claim_turn` 一次取出全部 `_next_step` 消息，再取一条 `_next_turn` 消息；中途引导因此会排在已经等待的下一轮问题之前。`claim_step` 也会一次取出当前批次的全部消息，不会人为拆成多次模型调用。
-- 教学版由 `run()` 主动处理队列，不实现空闲时休眠、收到新消息后自动唤醒等常驻服务能力。
+- `_state()` 从 `agent/inbox/spliced` 事件折叠出当前两条队列；重新创建 Inbox 时不依赖旧进程内存。
+- `claim_turn` 一次取出全部 `next-step` 消息，再取一条 `next-turn` 消息；中途引导因此会排在已经等待的下一轮问题之前。`claim_step` 也会一次取出当前批次的全部消息。
+- 教学版由 `run()` 主动处理队列，保留了内部领取方法；官方只把追加、前插、替换、移除、清空和队列快照作为公共 `agent.inbox` 接口，领取仍由驱动器内部完成。
 
 ## 7.3 持续处理消息的智能体循环
 
@@ -79,8 +74,8 @@ class Agent:
         self._registry = registry
         self._assembler = assembler
         self._variables = variables
-        self._inbox = Inbox()
         self._session = Session()
+        self._inbox = Inbox(self._session)
         self._turn_no = 0
 
     def followup(self, content: str) -> None:
@@ -90,31 +85,32 @@ class Agent:
         self._inbox.steer(Message(role="user", content=content))
 
     def run(self, max_turns: int = 5) -> Session:
-        tools = self._registry.all()
-        tools_by_name = {tool.name: tool for tool in tools}
-
-        while self._inbox.pending > 0 and self._turn_no < max_turns:
-            claimed = self._inbox.claim_turn()
-            if not claimed:
-                break
+        turns_run = 0
+        while self._inbox.pending > 0 and turns_run < max_turns:
+            turns_run += 1
             self._turn_no += 1
             self._session.append("turn/start", {"turn": self._turn_no})
-            self._run_turn(tools, tools_by_name, claimed)
+            claimed = self._inbox.claim_turn()
+            self._run_turn(claimed)
             self._session.append(
                 "turn/end", {"turn": self._turn_no, "reason": "completed"}
             )
         return self._session
 ```
 
-主循环按固定顺序运行：领取消息、记录轮次开始、执行本轮、记录轮次结束，直到消息队列清空。第 06 章的循环体移入 `_run_turn` 后，只增加了一个步骤：
+主循环按固定顺序运行：记录轮次开始、领取消息、执行本轮、记录轮次结束，直到消息队列清空或本次 `run()` 达到 `max_turns`。第 06 章的循环体移入 `_run_turn` 后，只增加了一个步骤：
 
 ```python
-    def _run_turn(self, tools, tools_by_name, claimed) -> None:
+    def _run_turn(self, claimed) -> None:
         for step in range(1, 11):
             if step > 1:
                 claimed = self._inbox.claim_step()
             self._session.append("step/start", {"turn": self._turn_no, "step": step})
             try:
+                system_prompt = self._assembler.render(self._variables)
+                self._session.record_system_prompt(
+                    system_prompt, turn=self._turn_no, step=step
+                )
                 for message in claimed:
                     self._session.append("user/message", {"content": message.content})
                 # 记录 request/header，请求模型并执行工具
@@ -127,7 +123,7 @@ class Agent:
 
 每个步骤都有明确边界。即使模型已经给出最终文本，只要请求期间又收到中途引导，当前轮就会继续执行下一步，而不是先结束当前轮再另开一轮。这就是 `steer` 能在当前轮生效的原因。
 
-教学版仍由调用方同步执行 `run()`：只要队列中有消息就继续运行，队列暂时为空时返回。官方实现可以在空闲时等待，并在收到消息后自动恢复；还会记录取消、阻塞和达到 token 上限等更多结束原因。本章只保留完成、错误和最大轮次数限制。
+教学版仍由调用方同步执行 `run()`：只要队列中有消息就继续运行，队列暂时为空时返回。`max_turns` 限制单次调用处理的轮数，不会阻止以后再次调用 `run()`。官方实现可以在空闲时等待并在收到消息后自动恢复，还支持按消息标识编辑和删除队列内容；本章只实现插入、领取、清空与日志恢复，并保留完成、错误和单次运行轮数限制。
 
 ## 7.4 模型请求失败后怎样重试
 
@@ -182,40 +178,26 @@ uv run python chapters/07-agent-inbox/src/demo.py
   [assistant] 8÷4 = **2**
 
 === 事件日志：两个轮次边界 ===
-  #0  turn/start            ← 轮次边界
-  #1  step/start
-  #2  user/message
-  #3  request/header
-  #4  assistant/message
-  #5  tool/call
-  #6  tool/result
-  #7  step/end
-  #8  step/start
-  #9  assistant/message
-  #10 step/end
-  #11 turn/end              ← 轮次边界
-  #12 turn/start            ← 轮次边界
-  #13 step/start
-  #14 user/message
-  #15 assistant/message
-  #16 tool/call
-  #17 tool/result
-  #18 step/end
-  #19 step/start
-  #20 assistant/message
-  #21 step/end
-  #22 turn/end              ← 轮次边界
+  #0  agent/inbox/spliced   ← followup 入队
+  #1  turn/start            ← 轮次边界
+  #2  agent/inbox/spliced   ← 驱动器领取消息
+  #3  step/start
+  #4  system/message
+  #5  user/message
+  #6  request/header
+  ... assistant/message / tool/call / tool/result ...
+  #N  turn/end              ← 轮次边界
 ```
 
 三个观察点：
 
 1. 历史能够延续。第 2 轮打印出的模型消息中包含第 1 轮的答案，说明新一轮确实使用了前面的对话。
-2. 轮次边界清楚。示例中的 23 条事件被分成两个由 `turn/start` 与 `turn/end` 包围的完整区间；模型行为即使改变，事件数量可能不同，轮次仍会完整闭合。
+2. 轮次边界清楚。每轮都由 `turn/start` 与 `turn/end` 包围；模型行为即使改变，事件数量可能不同，轮次仍会完整闭合。
 3. 这次每轮包含两个步骤：第一步请求工具，第二步生成最终文本。一次模型调用及其后续工具执行就是一个步骤，不能只根据模型消息数量判断。
 
 ## 本章小结
 
-- `Inbox`：分别保存下一轮问题和当前轮中途引导的两条队列
+- `Inbox`：通过 `agent/inbox/spliced` 持久记录下一轮和下一步骤队列
 - `Agent`：持续领取消息，并为每轮、每步记录明确边界
 - `followup` 与 `steer`：分别在下一轮和当前轮的下一步生效
 - `RetryPolicy`：只重试可能恢复的错误，并限制次数和等待时间
@@ -225,12 +207,12 @@ uv run python chapters/07-agent-inbox/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | 术语 | 官方同样用 turn 表示从唤醒到结束的一轮，用 step 表示一次模型调用和后续工具执行 |
-| 同上 | `Inbox` | 官方的 `send()` 会根据目标位置和是否唤醒智能体来分配消息；`followup`、`steer` 和 `inject` 分别表示下一轮、唤醒下一步和静默等待下一步 |
-| 同上 | `Agent` | 官方不直接公开 `ReactLoopAgent` 和消息队列，而是提供统一的 `send()` 接口；教学版直接展示类，便于观察运行过程 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/agent-loop/README.zh.md) | 术语 | 官方同样用 turn 表示从唤醒到结束的一轮，用 step 表示一次模型调用和后续工具执行 |
+| [`packages/core/agent-loop/src/inbox.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/agent-loop/src/inbox.ts) | `Inbox` | 对齐两级队列和 `agent/inbox/spliced` 恢复；教学版没有消息标识以及按标识编辑、删除接口 |
+| [`packages/core/agent/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/agent/README.zh.md) | `Agent` | 官方通过 `agent.inbox` 公开队列操作，具体领取由默认驱动器内部完成；教学版直接展示同步驱动器 |
 | 同上 | `_run_turn` | 核心循环只负责调用模型、运行工具和重复，其余行为由插件与事件组合 |
 | 同上 | 会话日志 | 已经接收的消息、请求边界和工具调用都会写入日志，并用于后续步骤重建请求 |
-| [`packages/llm/llm-retry/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-retry/README.zh.md) | `RetryPolicy` | 教学版保留有限次数、服务端等待时间、有上限的退避和重试事件；没有始终重试、取消和多个重试插件组合 |
+| [`packages/llm/llm-retry/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/llm/llm-retry/README.zh.md) | `RetryPolicy` | 教学版保留有限次数、服务端等待时间、有上限的退避和重试事件；没有始终重试、取消和多个重试插件组合 |
 
 ## 练习
 

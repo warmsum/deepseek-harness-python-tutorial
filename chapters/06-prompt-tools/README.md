@@ -5,8 +5,9 @@
 第 05 章结束时，每次发给模型的请求长这样：
 
 ```python
-messages = [Message(role="system", content=system_prompt), *session.derive_messages()]
-tools = [calculator]  # 一张写死的列表
+session.record_system_prompt(system_prompt, turn=1, step=step)
+messages = session.derive_messages()
+tools = [calculator]  # 固定工具列表
 ```
 
 系统提示词目前是一段手写字符串，工具清单则是固定列表。当智能体继续加入角色设定、安全规则和运行时信息后，提示词会来自不同模块，可用工具也会发生变化。本章把二者改造成可以组合的结构：不同模块分别提供提示词片段，组装器负责排序；工具注册表负责管理工具，并生成模型需要的说明。
@@ -31,11 +32,11 @@ tools = [calculator]  # 一张写死的列表
 | 人设 | 你是一个数学助手，遇到算式先调用工具 | 人设插件 |
 | 规则 | 回答先给结论，再给过程 | 沙箱插件 |
 | 工具目录 | 可用工具：calculator…… | 工具注册表 |
-| 运行时信息 | 当前模型：deepseek-chat | 框架自身 |
+| 运行时信息 | 当前模型：deepseek-v4-flash | 框架自身 |
 
-四个来源各自只负责自己的内容。如果全部由主流程拼接，主流程会再次承担过多职责；如果让插件共同改写一个字符串，最终顺序又会依赖加载时机，难以复现和调试。
+四个来源各自只负责自己的内容。如果全部由主流程拼接，主流程会再次承担过多职责；如果让插件共同改写一个字符串，最终顺序会依赖加载时机，难以复现和调试。
 
-组装器把“提供内容”和“拼接内容”分开。每个插件调用 `section(name, text, order)` 提供一段文字，组装时再按 `order` 排序。这样，只要各段的 `order` 不变，最终提示词就不会因为插件安装顺序不同而变化。
+组装器把“提供内容”和“拼接内容”分开。每个插件调用 `section(name, text, order)` 提供一段文字，组装时先按 `order`、再按名称排序。这样，同一组段无论按什么顺序安装，都能得到相同提示词。
 
 提示词还可以包含 `{{model}}` 这样的变量。组装时，程序会用当前模型名、工作目录等运行时信息替换它们。这比各个插件自行拼接字符串更容易检查，也能在变量缺失时及时报错。
 
@@ -63,7 +64,7 @@ class PromptAssembler:
         self._variables[name] = provider
 
     def render(self, variables: dict[str, str] | None = None) -> str:
-        ordered = sorted(self._sections, key=lambda s: s.order)
+        ordered = sorted(self._sections, key=lambda s: (s.order, s.name))
         text = "\n\n".join(section.text for section in ordered)
         resolved = {name: provider() for name, provider in self._variables.items()}
         resolved.update(variables or {})
@@ -77,8 +78,8 @@ class PromptAssembler:
 
 三个机制：
 
-1. 只按 `order` 排序。Python 的排序是稳定的，因此 `order` 相同时仍保持注册顺序。
-2. 同一注册表中的提示词段不能重名，重复注册会立即报错，而不是让后注册的内容悄悄覆盖前面的内容。
+1. 先按 `order` 排序，同一顺序值再按名称排序，避免插件加载顺序改变请求前缀。
+2. 同一注册表中的提示词段不能重名，重复注册会立即报错，避免后注册的内容覆盖已有段。
 3. 变量由 `variable(name, provider)` 注册，其中 `provider` 是一个返回当前值的函数。每次调用 `render()` 都会重新取值；模板引用了未知变量时直接报错，避免把没有替换的 `{{typo}}` 发给模型。
 
 ## 6.3 ToolRegistry：从列表到注册表
@@ -122,25 +123,20 @@ class ToolRegistry:
 ```python
 def run_agent(client, registry, assembler, user_prompt,
               max_steps=10, variables=None) -> Session:
-    tools = registry.all()
-    tools_by_name = {tool.name: tool for tool in tools}
     session = Session()
-    # ...turn/start、user/message 与第 05 章相同
+    # ...turn/start 与第 05 章相同
     request_header = None
 
     for step in range(1, max_steps + 1):
         system_prompt = assembler.render(variables)
-        # system、模型配置或工具 schema 变化时追加 request/header
+        session.record_system_prompt(system_prompt, turn=1, step=step)
+        # 模型配置、工具 schema 或消息序列变化时追加 request/header
         # ...计算 header_fingerprint 并与 request_header 比较
-        messages = [
-            Message(role="system", content=system_prompt),
-            *session.derive_messages(),
-        ]
-        reply = client.chat(messages, tools)
+        reply = client.chat(session.derive_messages(), registry.all())
         # ...其余与第 05 章相同
 ```
 
-至此，完整请求中的系统提示词由组装器生成，工具说明由注册表提供。每个步骤都会重新生成提示词，因此运行时变量发生变化后，下一次模型调用就能看到新值。只有系统提示词、模型配置或工具说明真正变化时，程序才追加新的 `request/header` 事件。运行循环不需要知道提示词由几段组成，也不关心工具由哪个模块注册。
+至此，完整请求中的系统提示词由组装器生成，工具说明由注册表提供。每个步骤都会重新生成提示词，因此运行时变量变化后，下一次模型调用就能看到新值。渲染结果写入 `system/message`；提示词变化时，新事件通过表层替换取代旧节点。`request/header` 只保存模型配置与工具 schema，系统提示词不再重复保存其中。提示词替换会开始新的消息序列，并记录 `reason="series"`。
 
 ## 6.5 运行完整示例
 
@@ -175,7 +171,7 @@ uv run python chapters/06-prompt-tools/src/demo.py
 ]
   ← 只有 name/description/parameters，没有 execute
 
-=== ③ 真实跑一遍 ===
+=== ③ 运行真实请求 ===
   [assistant]
   [assistant] 1+2*3 = **7**
 
@@ -186,18 +182,18 @@ uv run python chapters/06-prompt-tools/src/demo.py
 
 ## 本章小结
 
-- `PromptSection` 与 `PromptAssembler`：按 `order` 稳定排序，拒绝重名，严格替换变量
+- `PromptSection` 与 `PromptAssembler`：按 `order` 和名称稳定排序，拒绝重名，严格替换变量
 - `ToolRegistry`：检查工具重名，并把模型说明与本地执行函数分开
-- 运行循环：每一步重新取得系统提示词和工具清单，只在请求内容变化时记录新请求头
+- 运行循环：每一步重新取得系统提示词和工具清单，把提示词写入消息历史，并按请求序列记录请求头
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 与官方一样为提示词片段排序，拒绝同一层的重名，并在每次生成提示词时重新取得变量值 |
+| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 与官方一样按顺序值和名称排列片段，拒绝同一层重名，并在每次生成提示词时重新取得变量值 |
 | 同上 | 作用域与重名 | 不同作用域中，较近的提示词片段可以遮蔽较远的同名片段；同一作用域内重名会报错 |
-| 同上 | 稳定排序 | `order` 相同的片段保持注册顺序；工具默认按名称排序，只有显式配置 `toolOrder` 才会改变顺序 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `ToolRegistry` | 与官方一样由注册表生成模型需要的参数说明；执行函数只保留在本地，不进入模型请求 |
+| 同上 | 稳定排序 | `order` 相同的片段按名称排序；工具也默认按名称排序，官方还允许通过 `toolOrder` 指定顺序 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/b2e3b2a0125854567a4a5fcba75782e42fe84901/packages/core/tools/README.zh.md) | `ToolRegistry` | 与官方一样由注册表生成模型需要的参数说明；执行函数只保留在本地，不进入模型请求 |
 
 官方把工具参数说明也视为提示词组装结果的一部分。注册表通过 `ctx.systemPrompt.tools()` 把工具说明交给组装器，适配器再将它作为协议中的独立字段发送。教学版分别生成系统提示词和 `tools` 字段，再一起交给模型客户端，数据流更容易观察。
 

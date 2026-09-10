@@ -1,19 +1,18 @@
-"""第 11 章：命令执行与审批 —— 给 Agent 最危险的一只手。
+"""第 11 章：命令执行、权限模式与审批。
 
-对应官方 packages/shell（执行器 seam）+ packages/interaction/user-approval。
+对应官方 packages/shell（执行接口）和 packages/interaction/user-approval。
 教学版实现三件事：
 1. run_command —— subprocess 执行 + 超时 + 输出捕获；
 2. ApprovalPolicy —— 审批策略：ask（询问）/ never（直接拒绝）；
 3. grant_once —— 一次性授权：allowed-once 只放行所请求的那一个动作。
 
-诚实边界：官方 bash-sandbox 用内核级隔离（seatbelt/landlock）把
-「文件写效应」挡在系统调用层，并明确限制只覆盖文件影响；
-教学版不实现内核沙箱，只实现「模式门
-+ 审批」的决策层，并在对照表中明确差异。
+官方 bash-sandbox 使用内核机制（Seatbelt/Landlock）限制文件影响。
+教学版只实现模式判断和审批决策，不提供内核级隔离。
 """
 
 from __future__ import annotations
 
+import math
 import shlex
 import subprocess
 from collections.abc import Callable
@@ -55,12 +54,20 @@ def run_command(
 ) -> CommandResult:
     """执行一条 shell 命令，捕获输出，强制超时。
 
-    subprocess 三件套：
+    关键参数：
     - capture_output：stdout/stderr 不刷屏，收进结果里；
-    - timeout：命令挂死（如 sleep 9999）时强行杀掉——Agent 的
-      命令绝不能无限期占住进程；
+    - timeout：命令超过时限（如 sleep 9999）时终止子进程；
     - shell=True：按 shell 语法解析（管道、重定向都可用）。
     """
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command 必须是非空字符串")
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds 必须是正有限数")
     try:
         argv: str | list[str] = command if use_shell else shlex.split(command)
         completed = subprocess.run(
@@ -89,11 +96,11 @@ def run_command(
 
 
 class ShellPolicy:
-    """命令执行的决策层：模式门 + 审批。
+    """命令执行的决策层：运行模式与审批。
 
     决策顺序（对应官方 sandbox 决策的简化版）：
     1. allowed-once：一次性授权，用一次即失效；
-    2. 模式门：read-only 只放行白名单只读命令；更宽模式进入审批；
+    2. 运行模式：read-only 只放行白名单只读命令；更宽模式进入审批；
     3. 审批：policy=never 直接拒绝；policy=ask 调用审批回调。
     """
 
@@ -111,23 +118,27 @@ class ShellPolicy:
         self.approval_policy = approval_policy
         # 审批回调：返回 APPROVAL_ALLOWED_ONCE / APPROVAL_REJECTED / ...
         self.approver = approver or (lambda command: APPROVAL_REJECTED)
-        # 一次性授权票据：非 None 时本次命令免审，用后即焚
+        # 一次性授权：仅匹配一条完整命令，匹配后立即失效。
         self._granted_once: str | None = None
 
     def grant_once(self, command: str) -> None:
         """签发一次性授权（对应官方 allowed-once：只作用于所请求的那一个动作）。"""
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("command 必须是非空字符串")
         self._granted_once = command
 
     def decide(self, command: str) -> tuple[bool, str]:
         """决定一条命令能否执行。返回 (放行?, 理由)。
 
         决策顺序（每一步命中即返回）：
-        1. 一次性票据（allowed-once）：绕过模式门与审批，用后即焚；
-        2. 模式门：read-only 白名单命令直接放行（无风险，不惊动审批）；
-           read-only 其余命令直接拒绝（写类命令在只读模式下没有商量）；
+        1. 一次性授权（allowed-once）：匹配完整命令后直接放行并失效；
+        2. 运行模式：read-only 白名单命令无需审批，其他命令直接拒绝；
         3. 审批：never 直接拒绝；ask 调用审批回调（fail closed）。
         """
-        # 1) 一次性票据：绕过一切，用后即焚
+        if not isinstance(command, str) or not command.strip():
+            return False, "[sandbox] command 必须是非空字符串"
+
+        # 1) 一次性授权只匹配完整命令，匹配后立即失效。
         if self._granted_once == command:
             self._granted_once = None
             return True, "allowed-once（一次性授权）"
@@ -138,7 +149,7 @@ class ShellPolicy:
             return False, f"[sandbox] 无法解析命令: {error}"
         first_word = words[0] if words else ""
 
-        # 2) 模式门
+        # 2) 运行模式
         if self.mode == "read-only":
             if first_word in READ_ONLY_COMMANDS:
                 return True, "read-only 白名单放行"
@@ -159,7 +170,7 @@ class ShellPolicy:
     def execute(
         self, command: str, cwd: str, timeout_seconds: float = 30.0
     ) -> CommandResult:
-        """决策 + 执行：先过门，再跑命令。"""
+        """先完成策略判断，再执行获准的命令。"""
         allowed, reason = self.decide(command)
         if not allowed:
             return CommandResult(

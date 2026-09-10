@@ -1,10 +1,10 @@
-"""第 10 章：文件工具 —— 模型读写文件的手。
+"""第 10 章：供模型调用的文件操作。
 
 五个工具：read_file / write_file / edit_file / grep / glob。
 外加「读后写」观察策略（对应官方 fs-observation-policy 的 CAS 思想）：
 - 修改已存在的文件，必须先 read 过它（FS_NOT_OBSERVED）；
-- read 之后文件被外部改动过，写入要拒绝（FS_STALE_VERSION）——
-  防止模型拿着旧内容覆盖掉别人刚写的新内容。
+- read 之后文件被外部改动过，写入要拒绝（FS_STALE_VERSION），
+  防止模型依据旧内容覆盖外部更新。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from sandbox import SandboxPolicy
 
 @dataclass
 class ObservationTracker:
-    """「读后写」的版本检查：每个文件记住「模型最后一次读它时的样子」。
+    """读后写版本检查：记录模型最后一次读取文件时的修改时间。
 
     键统一用 resolve() 规范化——macOS 上 /var 是指向 /private/var 的
     符号链接，不做规范化会出现「读的是 A、写检查的是 B」的假阴性。"""
@@ -85,11 +85,12 @@ def edit_file(
     tracker: ObservationTracker,
     replace_all: bool = False,
 ) -> str:
-    """str-replace 局部替换：old_string 必须唯一匹配（歧义报错），
-    或显式 replace_all。"""
+    """执行字符串替换；默认要求 old_string 唯一匹配。"""
     target = policy.fence_write(path)
     if not target.exists():
         raise FileNotFoundError(f"[FS_NOT_FOUND] {target} 不存在")
+    if not old_string:
+        raise ValueError("[FS_INVALID_EDIT] old_string 不能为空")
     tracker.check_write(target)
     text = target.read_text(encoding="utf-8")
     count = text.count(old_string)

@@ -33,7 +33,10 @@ def fold_plan_mode(events: tuple[SessionEvent, ...]) -> bool:
     active = False
     for event in events:
         if event.type == "plan/mode":
-            active = bool(event.data["active"])
+            value = event.data.get("active")
+            if not isinstance(value, bool):
+                raise ValueError(f"plan/mode active 必须是布尔值（seq={event.seq}）")
+            active = value
     return active
 
 
@@ -58,15 +61,19 @@ class PlanModeController:
         self._narrate = False
 
     def get(self) -> PlanModeState:
-        return PlanModeState(fold_plan_mode(self._session.events), self._pending)
+        return PlanModeState(
+            fold_plan_mode(self._session.snapshot_events()), self._pending
+        )
 
     def set(self, active: bool) -> str:
         """空闲时立即提交；turn 内只排队到下一次 step 边界。"""
-        logged = fold_plan_mode(self._session.events)
+        if not isinstance(active, bool):
+            raise TypeError("active 必须是布尔值")
+        logged = fold_plan_mode(self._session.snapshot_events())
         target = logged if self._pending is None else self._pending
         if active == target:
             return "noop"
-        if _has_open_turn(self._session.events):
+        if _has_open_turn(self._session.snapshot_events()):
             self._pending = active
             self._narrate = True
             return "cancelled" if active == logged else "queued"
@@ -82,12 +89,15 @@ class PlanModeController:
         pending = self._pending
         if pending is None:
             return None
-        if pending != fold_plan_mode(self._session.events):
+        if pending != fold_plan_mode(self._session.snapshot_events()):
             self._session.append("plan/mode", {"active": pending})
         self._pending = None
         narrate = self._narrate
         self._narrate = False
-        if not narrate or _mode_at_last_header(self._session.events) in (None, pending):
+        if not narrate or _mode_at_last_header(self._session.snapshot_events()) in (
+            None,
+            pending,
+        ):
             return None
         return (
             "The user switched this session to plan mode."
@@ -97,7 +107,7 @@ class PlanModeController:
 
     def prompt_section(self) -> str:
         target = (
-            fold_plan_mode(self._session.events)
+            fold_plan_mode(self._session.snapshot_events())
             if self._pending is None
             else self._pending
         )
@@ -105,7 +115,7 @@ class PlanModeController:
 
     def exit(self, plan: str) -> str:
         """呈交完整计划；只有用户明确、唯一批准才排队退出。"""
-        if not fold_plan_mode(self._session.events):
+        if not fold_plan_mode(self._session.snapshot_events()):
             raise RuntimeError(f"{EXIT_PLAN_MODE} is only available in plan mode")
         if re.match(r"^#\s+\S", plan.strip()) is None:
             raise RuntimeError(
